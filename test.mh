@@ -1,14 +1,23 @@
 extern fn putchar(c: i32): i32;
 extern fn printf(fmt: *u8, ...): i32;
 
+struct Point {
+  x: i32,
+  y: f32,
+}
+
 fn main(): i64 {
-  var c: i8 = 'A';
   var str: []u8 = "Hello, World!";
 
   var xs: [5]i64 = [1, 2, 3, 4, 5];
   var s: []u8 = str[7:];
 
-  putchar(c);
+  var p: Point = undef;
+
+  p.x = 'A';
+  p.y = 15.14;
+
+  putchar(p.x);
   putchar('\n');
 
   printf("Test %d, %f\n".ptr, xs[1], 420.69);

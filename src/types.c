@@ -10,8 +10,10 @@
 
 // Builtin types
 
-#define TYPE_DEFINE(type_kind, type_size, ident)                                           \
-  static Type type_##ident##_def = {.kind = type_kind, .size = type_size, .name = #ident};
+// A builtin is aligned to its size; one without storage gets 1, so that aligning to it is always valid.
+#define TYPE_DEFINE(type_kind, type_size, ident)                                                           \
+  static Type type_##ident##_def = {                                                                       \
+    .kind = type_kind, .size = type_size, .alignment = (type_size) > 0 ? (type_size) : 1, .name = #ident};
 TYPES_BUILTIN(TYPE_DEFINE)
 #undef TYPE_DEFINE
 
@@ -82,12 +84,17 @@ bool type_is_slice(Type *type) {
   return type->kind == TYPE_KIND_SLICE;
 }
 
+bool type_is_struct(Type *type) {
+  if (!type) return false;
+  return type->kind == TYPE_KIND_STRUCT;
+}
+
 bool type_is_array_like(Type *type) {
   return type_is_array(type) || type_is_slice(type);
 }
 
 bool type_is_aggregate(Type *type) {
-  return type_is_array(type) || type_is_slice(type);
+  return type_is_array(type) || type_is_slice(type) || type_is_struct(type);
 }
 
 // Compiler-internal types
@@ -132,6 +139,7 @@ const char *type_display_name(Type *type) {
   case TYPE_KIND_POINTER:
   case TYPE_KIND_ARRAY:
   case TYPE_KIND_SLICE:
+  case TYPE_KIND_STRUCT:
   case TYPE_KIND_FUNCTION:
     return type->name;
   }
@@ -170,6 +178,7 @@ bool type_int_fits(Type *type, int64_t value) {
   case TYPE_KIND_POINTER:
   case TYPE_KIND_ARRAY:
   case TYPE_KIND_SLICE:
+  case TYPE_KIND_STRUCT:
   case TYPE_KIND_ERROR:
   case TYPE_KIND_VOID:
   case TYPE_KIND_UNDEF:
@@ -292,6 +301,7 @@ Type *type_pointer_to(Arena *arena, Type *base_type) {
     .kind = TYPE_KIND_POINTER,
     .name = name,
     .size = 8,
+    .alignment = 8,
     .pointer = {.base_type = base_type},
   };
 
@@ -308,6 +318,7 @@ Type *type_array_of(Arena *arena, Type *elem_type, uint32_t length) {
     .kind = TYPE_KIND_ARRAY,
     .name = name,
     .size = elem_type->size * length,
+    .alignment = elem_type->alignment,
     .array = {.elem_type = elem_type, .length = length},
   };
 
@@ -324,6 +335,7 @@ Type *type_slice_of(Arena *arena, Type *elem_type) {
     .kind = TYPE_KIND_SLICE,
     .name = name,
     .size = 16,
+    .alignment = 8,
     .slice = {.elem_type = elem_type},
   };
 
@@ -346,16 +358,26 @@ Type *type_default(Type *type) {
 bool type_find_field(Arena *arena, Type *type, const char *name, TypeField *field) {
   if (type_is_slice(type)) {
     if (strcmp(name, "ptr") == 0) {
-      field->offset = SLICE_PTR_OFFSET;
-      field->type = type_pointer_to(arena, type->slice.elem_type);
+      Type *ptr_type = type_pointer_to(arena, type->slice.elem_type);
+      *field = (TypeField){.name = name, .type = ptr_type, .offset = SLICE_PTR_OFFSET};
       return true;
     }
     if (strcmp(name, "len") == 0) {
-      field->offset = SLICE_LEN_OFFSET;
-      field->type = type_i64;
+      *field = (TypeField){.name = name, .type = type_i64, .offset = SLICE_LEN_OFFSET};
       return true;
     }
     return false;
+  }
+
+  if (!type_is_struct(type)) {
+    return false;
+  }
+
+  for (uint32_t i = 0; i < type->structure.field_count; i++) {
+    if (type->structure.fields[i].name != name) continue;
+
+    *field = type->structure.fields[i];
+    return true;
   }
 
   return false;

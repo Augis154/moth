@@ -247,7 +247,7 @@ typedef struct {
 
 typedef struct {
   const char *name;
-  AstType *declared_type;
+  AstType *type;
   AstExpr *init;
 
   Symbol *symbol; // Filled in by sema
@@ -291,29 +291,45 @@ struct AstStmt_ {
 typedef enum {
   AST_DECL_INVALID,
   AST_DECL_FUNCTION,
+  AST_DECL_STRUCT,
 } AstDeclKind;
 
 typedef struct {
   SourceLoc loc;
   const char *name;
-  AstType *declared_type;
+  AstType *type;
   Symbol *symbol; // Filled in by sema
 } AstParam;
 
 typedef struct {
   const char *name;
 
+  AstType *return_type;
+  AstStmt *body;
+
   AstParam *params;
   uint32_t param_count;
-
-  AstType *declared_return_type;
-  AstStmt *body;
 
   bool is_extern;
   bool is_variadic;
 
   Symbol *symbol; // Filled in by sema
 } AstDeclFunction;
+
+typedef struct {
+  const char *name;
+  AstType *type;
+  SourceLoc loc;
+} AstStructField;
+
+typedef struct {
+  const char *name;
+
+  AstStructField *fields;
+  uint32_t field_count;
+
+  Symbol *symbol; // Filled in by sema
+} AstDeclStruct;
 
 struct AstDecl_ {
   AstDeclKind kind;
@@ -322,6 +338,7 @@ struct AstDecl_ {
 
   union {
     AstDeclFunction decl_function;
+    AstDeclStruct decl_struct;
   };
 };
 

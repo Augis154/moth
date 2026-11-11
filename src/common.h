@@ -21,7 +21,6 @@ typedef struct AstType_ AstType;
 
 typedef struct Type_ Type;
 typedef struct Symbol_ Symbol;
-typedef struct Scope_ Scope;
 
 typedef struct {
   const char *filename;

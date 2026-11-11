@@ -29,16 +29,23 @@ __attribute__((format(printf, 3, 4))) static void sema_error(SemaContext *ctx, S
 
 // Scope management functions
 
-static Scope *scope_enter(SemaContext *ctx, Scope *current) {
-  Scope *new_scope = arena_calloc(&ctx->comp_unit->arena, sizeof(Scope));
-  new_scope->parent = current;
-  new_scope->depth = current ? (current->depth + 1) : 0;
-  return new_scope;
+// Opens a nested scope; returns the start of the enclosing one, which `scope_exit` takes back.
+static uint32_t scope_enter(SemaContext *ctx) {
+  uint32_t outer_start = ctx->scope_start;
+
+  ctx->scope_start = da_len(ctx->locals);
+  ctx->scope_depth++;
+
+  return outer_start;
 }
 
-static Scope *scope_exit(Scope *current) {
-  assert(current != NULL);
-  return current->parent;
+// Closes the current scope: its locals stop being visible, but the symbols stay allocated.
+static void scope_exit(SemaContext *ctx, uint32_t outer_start) {
+  assert(ctx->scope_depth > 0 && "the global scope is never closed");
+
+  da_set_len(ctx->locals, ctx->scope_start);
+  ctx->scope_start = outer_start;
+  ctx->scope_depth--;
 }
 
 // Allocates a symbol; `name` must be interned. It is not added to any scope.
@@ -54,14 +61,15 @@ static Symbol *symbol_new(SemaContext *ctx, const char *name, SymbolKind kind, T
   return sym;
 }
 
-// Finds `name` declared directly in `scope`. `name` must be interned. The global scope is large, so it is
+// Finds `name` declared directly in the current scope; `name` must be interned. The global scope is large, so it is
 // indexed by the compilation unit's symbol table; nested scopes are small and scanned linearly.
-static Symbol *scope_find(SemaContext *ctx, Scope *scope, const char *name) {
-  if (scope->parent == NULL) {
+static Symbol *scope_lookup_current(SemaContext *ctx, const char *name) {
+  if (ctx->scope_depth == 0) {
     return st_get(&ctx->comp_unit->symbol_table, name);
   }
 
-  for (Symbol *sym = scope->symbols; sym != NULL; sym = sym->next) {
+  for (size_t i = da_len(ctx->locals); i > ctx->scope_start; i--) {
+    Symbol *sym = ctx->locals[i - 1];
     if (sym->name == name) {
       return sym;
     }
@@ -70,73 +78,61 @@ static Symbol *scope_find(SemaContext *ctx, Scope *scope, const char *name) {
   return NULL;
 }
 
-// Declares `name` in the current scope; returns NULL if it is already declared there.
-static Symbol *scope_insert(SemaContext *ctx, const char *name, SymbolKind kind, Type *type, SourceLoc loc) {
-  const char *interned_name = st_intern(&ctx->comp_unit->intern_table, name);
+// Finds `name` in the current scope or any enclosing one (names are interned, so pointers are compared).
+static Symbol *scope_lookup(SemaContext *ctx, const char *name) {
+  for (size_t i = da_len(ctx->locals); i > 0; i--) {
+    Symbol *sym = ctx->locals[i - 1];
+    if (sym->name == name) {
+      return sym;
+    }
+  }
 
-  if (scope_find(ctx, ctx->current_scope, interned_name)) {
+  return st_get(&ctx->comp_unit->symbol_table, name);
+}
+
+// Whether a type name can refer to `sym`: a variable that failed to declare is skipped, so it hides no type.
+static bool symbol_names_type(const Symbol *sym) {
+  return sym->kind == SYMBOL_TYPE || sym->type != type_error;
+}
+
+// Finds the symbol a type name refers to.
+static Symbol *scope_lookup_type_name(SemaContext *ctx, const char *name) {
+  for (size_t i = da_len(ctx->locals); i > 0; i--) {
+    Symbol *sym = ctx->locals[i - 1];
+    if (sym->name == name && symbol_names_type(sym)) {
+      return sym;
+    }
+  }
+
+  Symbol *sym = st_get(&ctx->comp_unit->symbol_table, name);
+
+  return sym && symbol_names_type(sym) ? sym : NULL;
+}
+
+// Declares `name` in the current scope; returns NULL if it is already declared there. Every name that reaches sema
+// is interned: the parser interns identifiers, and `sema_init_builtins` the builtin type names.
+static Symbol *scope_insert(SemaContext *ctx, const char *name, SymbolKind kind, Type *type, SourceLoc loc) {
+  assert(st_intern(&ctx->comp_unit->intern_table, name) == name && "scope_insert: name is not interned");
+
+  if (scope_lookup_current(ctx, name)) {
     return NULL;
   }
 
-  Symbol *sym = symbol_new(ctx, interned_name, kind, type, loc);
-  sym->next = ctx->current_scope->symbols;
-  ctx->current_scope->symbols = sym;
+  Symbol *sym = symbol_new(ctx, name, kind, type, loc);
 
-  if (ctx->current_scope->parent == NULL) {
-    st_set(&ctx->comp_unit->symbol_table, interned_name, sym);
+  if (ctx->scope_depth == 0) {
+    st_set(&ctx->comp_unit->symbol_table, name, sym);
+  } else {
+    da_append(ctx->locals, sym);
   }
 
   return sym;
 }
 
-// Finds `name` in the current scope or any enclosing one (names are interned, so pointers are compared).
-static Symbol *scope_lookup(SemaContext *ctx, const char *name) {
-  for (Scope *sc = ctx->current_scope; sc != NULL; sc = sc->parent) {
-    Symbol *sym = scope_find(ctx, sc, name);
-    if (sym) {
-      return sym;
-    }
-  }
-
-  return NULL;
-}
-
-// Finds the symbol a type name refers to.
-static Symbol *scope_lookup_type_name(SemaContext *ctx, const char *name) {
-  for (Scope *sc = ctx->current_scope; sc != NULL; sc = sc->parent) {
-    Symbol *sym = scope_find(ctx, sc, name);
-    if (sym && (sym->kind == SYMBOL_TYPE || sym->type != type_error)) {
-      return sym;
-    }
-  }
-
-  return NULL;
-}
-
-static Symbol *scope_lookup_current(SemaContext *ctx, const char *name) {
-  return scope_find(ctx, ctx->current_scope, name);
-}
-
 // The line where `name` was first declared in the current scope, for "Previous declaration" notes; 0 if it is unknown.
 static uint32_t previous_declaration_line(SemaContext *ctx, const char *name) {
-  Symbol *existing = scope_lookup_current(ctx, st_intern(&ctx->comp_unit->intern_table, name));
-  return existing ? existing->loc.line : 0;
-}
-
-static Symbol *scope_insert_type(SemaContext *ctx, const char *name, Type *type, SourceLoc loc) {
-  name = st_intern(&ctx->comp_unit->intern_table, name);
-
   Symbol *existing = scope_lookup_current(ctx, name);
-  if (existing) {
-    sema_error(ctx,
-               loc,
-               "Redeclaration of type '%s' in current scope. Previous declaration at line %u",
-               name,
-               existing->loc.line);
-    return NULL;
-  }
-
-  return scope_insert(ctx, name, SYMBOL_TYPE, type, loc);
+  return existing ? existing->loc.line : 0;
 }
 
 // Reports an error if `name` is a type name.
@@ -148,6 +144,10 @@ static bool sema_reject_type_name(SemaContext *ctx, const char *name, SourceLoc 
 
   sema_error(ctx, loc, "'%s' is a type name and cannot be used as a variable name", name);
   return true;
+}
+
+static inline size_t align_to(size_t offset, size_t align) {
+  return (offset + align - 1) & ~(align - 1);
 }
 
 // Expression types
@@ -173,6 +173,10 @@ static bool is_lvalue(const SemaContext *ctx, const AstExpr *expr) {
   case AST_EXPR_SUBSCRIPT: {
     const AstExpr *target = expr->expr_subscript.target;
     return type_is_slice(sema_expr_type(ctx, target)) || is_lvalue(ctx, target);
+  }
+  case AST_EXPR_MEMBER: {
+    const AstExpr *object = expr->expr_member.object;
+    return type_is_pointer(sema_expr_type(ctx, object)) || is_lvalue(ctx, object);
   }
 
   default:
@@ -494,7 +498,6 @@ static Type *sema_expr_identifier(SemaContext *ctx, AstExpr *expr) {
     return type_error;
   }
 
-  sym->is_used = true;
   expr->expr_identifier.symbol = sym;
   return sym->type;
 }
@@ -861,6 +864,10 @@ static Type *sema_expr_member(SemaContext *ctx, AstExpr *expr) {
     return type_error;
   }
 
+  if (type_is_pointer(object_type)) {
+    object_type = object_type->pointer.base_type;
+  }
+
   if (type_is_array(object_type) && strcmp(expr->expr_member.member, "len") == 0) {
     int64_t length = object_type->array.length;
 
@@ -876,7 +883,7 @@ static Type *sema_expr_member(SemaContext *ctx, AstExpr *expr) {
 
   if (!found) {
     sema_error(
-      ctx, expr->loc, "Type '%s' has no member named '%s'", type_display_name(object_type), expr->expr_member.member);
+      ctx, expr->loc, "Type '%s' has no field named '%s'", type_display_name(object_type), expr->expr_member.member);
     return type_error;
   }
 
@@ -915,6 +922,9 @@ static Type *variadic_promoted_type(Type *type) {
     return type_f64;
 
   case TYPE_KIND_POINTER:
+    return type;
+
+  case TYPE_KIND_STRUCT:
     return type;
 
   case TYPE_KIND_UNTYPED_INT:
@@ -1499,13 +1509,13 @@ Type *sema_expr_hint(SemaContext *ctx, AstExpr *expr, Type *hint) {
 // Statement semantic analysis functions
 
 static void sema_stmt_block(SemaContext *ctx, AstStmt *stmt) {
-  ctx->current_scope = scope_enter(ctx, ctx->current_scope);
+  uint32_t outer_start = scope_enter(ctx);
 
   for (uint32_t i = 0; i < stmt->stmt_block.statement_count; i++) {
     sema_stmt(ctx, stmt->stmt_block.statements[i]);
   }
 
-  ctx->current_scope = scope_exit(ctx->current_scope);
+  scope_exit(ctx, outer_start);
 }
 
 static void sema_stmt_expression(SemaContext *ctx, AstStmt *stmt) {
@@ -1556,7 +1566,7 @@ static Type *sema_inferred_array_type(SemaContext *ctx, AstType *type, AstExpr *
 
 // Resolves a local variable's annotation (NULL if none) and analyses the initializer against it.
 static Type *sema_local_var_type(SemaContext *ctx, AstStmt *stmt) {
-  AstType *declared_type = stmt->stmt_local_var.declared_type;
+  AstType *declared_type = stmt->stmt_local_var.type;
   AstExpr *initializer = stmt->stmt_local_var.init;
 
   if (declared_type && declared_type->kind == AST_TYPE_ARRAY && !declared_type->array.length_expr) {
@@ -1636,7 +1646,6 @@ static void sema_stmt_local_var(SemaContext *ctx, AstStmt *stmt) {
     sym->local.in_memory = true;
   }
 
-  sym->is_defined = stmt->stmt_local_var.init != NULL;
   stmt->stmt_local_var.symbol = sym;
 }
 
@@ -1739,15 +1748,43 @@ void sema_stmt(SemaContext *ctx, AstStmt *stmt) {
 
 // Pass 1: Symbol discovery
 
+// Declares a top-level name and links its symbol to `decl`. A redeclaration is reported and gets a symbol that is in
+// no scope, so the declaration can still be analysed.
+static Symbol *sema_declare(SemaContext *ctx, AstDecl *decl, const char *name, SymbolKind kind, Type *type,
+                            const char *what) {
+  Symbol *sym = scope_insert(ctx, name, kind, type, decl->loc);
+  if (!sym) {
+    uint32_t previous_line = previous_declaration_line(ctx, name);
+
+    // Only a builtin type is declared without a source line
+    if (previous_line == 0) {
+      sema_error(ctx, decl->loc, "Cannot declare %s '%s': the name is a builtin type", what, name);
+    } else {
+      sema_error(ctx,
+                 decl->loc,
+                 "Redeclaration of %s '%s' in current scope. Previous declaration at line %u",
+                 what,
+                 name,
+                 previous_line);
+    }
+
+    sym = symbol_new(ctx, name, kind, type, decl->loc);
+  }
+
+  sym->decl = decl;
+
+  return sym;
+}
+
 // Pass 1: resolves the signature and declares the function globally so it can be called before its definition.
 static void sema_pass1_decl_function(SemaContext *ctx, AstDecl *decl) {
   AstDeclFunction *func_decl = &decl->decl_function;
 
-  Type *return_type = sema_type(ctx, func_decl->declared_return_type);
+  Type *return_type = sema_type(ctx, func_decl->return_type);
 
   Type **param_types = arena_alloc(&ctx->comp_unit->arena, sizeof(Type *) * func_decl->param_count);
   for (uint32_t i = 0; i < func_decl->param_count; i++) {
-    param_types[i] = sema_type(ctx, func_decl->params[i].declared_type);
+    param_types[i] = sema_type(ctx, func_decl->params[i].type);
 
     if (!type_has_storage(param_types[i])) {
       sema_error(ctx,
@@ -1772,28 +1809,93 @@ static void sema_pass1_decl_function(SemaContext *ctx, AstDecl *decl) {
       },
   };
 
-  Symbol *sym = scope_insert(ctx, func_decl->name, SYMBOL_FUNCTION, func_type, decl->loc);
-  if (!sym) {
-    sema_error(ctx,
-               decl->loc,
-               "Redeclaration of function '%s' in current scope. Previous declaration at line %u",
-               func_decl->name,
-               previous_declaration_line(ctx, func_decl->name));
+  func_decl->symbol = sema_declare(ctx, decl, func_decl->name, SYMBOL_FUNCTION, func_type, "function");
+}
 
-    const char *sym_name = st_intern(&ctx->comp_unit->intern_table, func_decl->name);
-    sym = symbol_new(ctx, sym_name, SYMBOL_FUNCTION, func_type, decl->loc);
+// Pass 1: lays out the fields and declares the struct globally. A struct with an invalid field becomes the error
+// type, so that its uses report nothing more.
+static void sema_pass1_decl_struct(SemaContext *ctx, AstDecl *decl) {
+  AstDeclStruct *struct_decl = &decl->decl_struct;
+
+  uint32_t field_count = struct_decl->field_count;
+  TypeField *fields = arena_alloc(&ctx->comp_unit->arena, sizeof(TypeField) * field_count);
+
+  uint32_t current_offset = 0;
+  uint32_t max_align = 1;
+  bool fields_ok = true;
+
+  for (uint32_t i = 0; i < field_count; i++) {
+    Type *field_type = sema_type(ctx, struct_decl->fields[i].type);
+
+    if (!type_has_storage(field_type)) {
+      sema_error(ctx,
+                 struct_decl->fields[i].loc,
+                 "Cannot declare field '%s' of type '%s' in struct '%s'",
+                 struct_decl->fields[i].name,
+                 type_display_name(field_type),
+                 struct_decl->name);
+      field_type = type_error;
+    }
+
+    for (uint32_t j = 0; j < i; j++) {
+      if (struct_decl->fields[i].name != struct_decl->fields[j].name) continue;
+
+      sema_error(ctx,
+                 struct_decl->fields[i].loc,
+                 "Duplicate field '%s' in struct '%s'. Previous declaration at line %d",
+                 struct_decl->fields[i].name,
+                 struct_decl->name,
+                 struct_decl->fields[j].loc.line);
+      field_type = type_error;
+    }
+
+    if (field_type == type_error) {
+      fields_ok = false;
+    }
+
+    current_offset = align_to(current_offset, field_type->alignment);
+
+    fields[i].name = struct_decl->fields[i].name;
+    fields[i].type = field_type;
+    fields[i].offset = current_offset;
+
+    current_offset += field_type->size;
+
+    if (field_type->alignment > max_align) {
+      max_align = field_type->alignment;
+    }
   }
 
-  sym->type = func_type;
-  sym->is_defined = !func_decl->is_extern;
-  sym->function.decl = decl;
-  func_decl->symbol = sym;
+  uint32_t total_size = align_to(current_offset, max_align);
+
+  Type *struct_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
+  *struct_type = (Type){
+    .kind = TYPE_KIND_STRUCT,
+    .name = struct_decl->name,
+    .size = total_size,
+    .alignment = max_align,
+    .structure =
+      {
+        .fields = fields,
+        .field_count = field_count,
+      },
+  };
+
+  if (!fields_ok) {
+    struct_type = type_error;
+  }
+
+  struct_decl->symbol = sema_declare(ctx, decl, struct_decl->name, SYMBOL_TYPE, struct_type, "struct");
 }
 
 static void sema_pass1_decl(SemaContext *ctx, AstDecl *decl) {
   switch (decl->kind) {
   case AST_DECL_FUNCTION:
     sema_pass1_decl_function(ctx, decl);
+    break;
+
+  case AST_DECL_STRUCT:
+    sema_pass1_decl_struct(ctx, decl);
     break;
 
   case AST_DECL_INVALID:
@@ -1816,7 +1918,7 @@ static void sema_pass2_decl_function(SemaContext *ctx, AstDecl *decl) {
   }
 
   ctx->current_function = func_decl;
-  ctx->current_scope = scope_enter(ctx, ctx->current_scope);
+  uint32_t outer_start = scope_enter(ctx);
 
   Type *func_type = func_decl->symbol->type;
 
@@ -1841,7 +1943,6 @@ static void sema_pass2_decl_function(SemaContext *ctx, AstDecl *decl) {
       continue;
     }
 
-    sym->is_defined = true;
     sym->local.is_param = true;
 
     if (type_is_aggregate(param_type)) {
@@ -1853,7 +1954,7 @@ static void sema_pass2_decl_function(SemaContext *ctx, AstDecl *decl) {
 
   sema_stmt(ctx, func_decl->body);
 
-  ctx->current_scope = scope_exit(ctx->current_scope);
+  scope_exit(ctx, outer_start);
   ctx->current_function = prev_func;
 }
 
@@ -1863,6 +1964,7 @@ static void sema_pass2_decl(SemaContext *ctx, AstDecl *decl) {
     return sema_pass2_decl_function(ctx, decl);
   }
 
+  case AST_DECL_STRUCT:
   case AST_DECL_INVALID:
     return;
   }
@@ -1979,10 +2081,12 @@ Type *sema_type(SemaContext *ctx, AstType *type) {
 
 // Semantic analysis functions
 
+// Declares the builtin types that can be named in source; they have no source line.
 static void sema_init_builtins(SemaContext *ctx) {
-#define TYPE_DEFINE(kind, size, ident)                            \
-  if (!type_is_internal(type_##ident)) {                          \
-    scope_insert_type(ctx, #ident, type_##ident, (SourceLoc){0}); \
+#define TYPE_DEFINE(kind, size, ident)                                   \
+  if (!type_is_internal(type_##ident)) {                                 \
+    const char *name = st_intern(&ctx->comp_unit->intern_table, #ident); \
+    scope_insert(ctx, name, SYMBOL_TYPE, type_##ident, (SourceLoc){0});  \
   }
   TYPES_BUILTIN(TYPE_DEFINE)
 #undef TYPE_DEFINE
@@ -1990,7 +2094,9 @@ static void sema_init_builtins(SemaContext *ctx) {
 
 void sema_init(SemaContext *ctx, CompilationUnit *comp_unit) {
   ctx->comp_unit = comp_unit;
-  ctx->current_scope = scope_enter(ctx, NULL);
+  ctx->locals = NULL;
+  ctx->scope_start = 0;
+  ctx->scope_depth = 0;
   ctx->next_symbol_id = 1;
   ctx->loop_depth = 0;
 
@@ -2004,6 +2110,7 @@ void sema_init(SemaContext *ctx, CompilationUnit *comp_unit) {
 }
 
 void sema_free(SemaContext *ctx) {
+  da_free(ctx->locals);
   da_free(ctx->expr_types);
 }
 

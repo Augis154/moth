@@ -20,7 +20,6 @@ typedef struct {
 
   IrModule *module;
   uint32_t current_func_idx;
-  Symbol *current_func_sym;
 
   uint32_t next_reg;
   uint32_t next_label;

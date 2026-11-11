@@ -41,6 +41,7 @@ typedef enum {
   TYPE_KIND_ARRAY,
   TYPE_KIND_SLICE,
   TYPE_KIND_FUNCTION,
+  TYPE_KIND_STRUCT,
 } TypeKind;
 
 typedef struct {
@@ -64,9 +65,22 @@ typedef struct {
   bool is_variadic;
 } TypeFunction;
 
+// A field of a type: its name, its type and where it is in memory
+typedef struct {
+  const char *name;
+  Type *type;
+  uint32_t offset;
+} TypeField;
+
+typedef struct {
+  TypeField *fields;
+  uint32_t field_count;
+} TypeStructure;
+
 struct Type_ {
   TypeKind kind;
   uint32_t size;
+  uint32_t alignment;
   const char *name;
 
   union {
@@ -74,18 +88,13 @@ struct Type_ {
     TypeArray array;
     TypeSlice slice;
     TypeFunction function;
+    TypeStructure structure;
   };
 };
 
 // The layout of a slice is `{ptr, len}`: the offsets in bytes of its two fields
 #define SLICE_PTR_OFFSET 0
 #define SLICE_LEN_OFFSET 8
-
-// A member of a type: where it is in memory and its type
-typedef struct {
-  uint32_t offset;
-  Type *type;
-} TypeField;
 
 #define TYPE_EXTERN(kind, size, ident) extern Type *const type_##ident;
 TYPES_BUILTIN(TYPE_EXTERN)
@@ -104,6 +113,7 @@ bool type_is_numeric(Type *type);
 bool type_is_pointer(Type *type);
 bool type_is_array(Type *type);
 bool type_is_slice(Type *type);
+bool type_is_struct(Type *type);
 // An array or a slice: something that can be indexed and sliced
 bool type_is_array_like(Type *type);
 // Values that are handled by the address of their storage instead of being loaded into a register
@@ -144,8 +154,8 @@ Type *type_elem(Type *type);
 // The concrete type an untyped literal takes when nothing else decides it
 Type *type_default(Type *type);
 
-// Members of a type
-// Finds the member `name` of `type`; false when it has none.
+// Fields of a type
+// Finds the field `name` of `type`, a struct or a slice; false when it has none.
 bool type_find_field(Arena *arena, Type *type, const char *name, TypeField *field);
 
 #endif // TYPES_H

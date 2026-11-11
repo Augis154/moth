@@ -66,6 +66,7 @@
 #define TOKENS_KEYWORDS(X)      \
   X(TOKEN_VAR, "var")           \
   X(TOKEN_FN, "fn")             \
+  X(TOKEN_STRUCT, "struct")     \
   X(TOKEN_EXTERN, "extern")     \
                                 \
   X(TOKEN_IF, "if")             \

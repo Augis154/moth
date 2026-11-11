@@ -91,6 +91,12 @@ typedef struct {
 #define NULL_REG ((IrReg){0})
 #define NULL_LABEL ((IrLabel){0})
 
+// A stack slot; both fields come from the `Type` of the value it holds.
+typedef struct {
+  uint32_t size;
+  uint32_t alignment;
+} IrAlloc;
+
 typedef struct {
   const char *callee;
   IrReg *args;
@@ -110,6 +116,7 @@ typedef struct {
     int64_t int_lit;
     double float_lit;
     IrDataId data; // GLOBAL_ADDR
+    IrAlloc alloc; // ALLOC
     IrCall call;
     IrLabel target;
     struct {
@@ -155,7 +162,7 @@ typedef struct {
 #define IR_F64 IR_FLOAT(8)
 
 // `count` consecutive values of one type, which can itself be an aggregate. An array is a single field; a slice has
-// two (pointer and length) and a struct one per member.
+// two (pointer and length) and a struct one for each of its fields.
 typedef struct {
   IrType type;
   uint32_t count;

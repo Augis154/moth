@@ -15,15 +15,19 @@ typedef enum {
   SYMBOL_TYPE,
 } SymbolKind;
 
+typedef enum {
+  SYM_UNRESOLVED,
+  SYM_RESOLVING,
+  SYM_RESOLVED,
+} SymbolResolveState;
+
 typedef struct {
   bool is_param;
   bool in_memory;
 } SymbolLocal;
 
-typedef struct {
-  AstDecl *decl;
-} SymbolFunction;
-
+// A named entity, and the source of truth for what a name means. The AST points at its symbol and the symbol at its
+// type; a type never points back.
 struct Symbol_ {
   SymbolKind kind;
   uint32_t id;
@@ -33,27 +37,21 @@ struct Symbol_ {
 
   SourceLoc loc;
 
-  struct Symbol_ *next;
-
-  bool is_used;
-  bool is_defined;
+  SymbolResolveState resolve_state;
 
   union {
-    SymbolLocal local;
-    SymbolFunction function;
+    SymbolLocal local; // SYMBOL_LOCAL_VAR
+    AstDecl *decl;     // SYMBOL_FUNCTION and SYMBOL_TYPE: the declaration, NULL for a builtin type
   };
 };
-
-typedef struct Scope_ {
-  struct Scope_ *parent;
-  Symbol *symbols;
-  uint32_t depth;
-} Scope;
 
 typedef struct {
   CompilationUnit *comp_unit;
 
-  Scope *current_scope;
+  Symbol **locals;      // Every local that is visible now, innermost last; globals are in the symbol table
+  uint32_t scope_start; // Index in `locals` where the current scope begins
+  uint32_t scope_depth; // 0 is the global scope
+
   AstDeclFunction *current_function;
 
   uint32_t next_symbol_id;

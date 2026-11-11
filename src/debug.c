@@ -308,6 +308,14 @@ void debug_print_ast_decl(Arena *arena, AstDecl *decl) {
     debug_print_ast_stmt(arena, decl->decl_function.body);
     return;
 
+  case AST_DECL_STRUCT:
+    printf("Struct Declaration: %s\n", decl->decl_struct.name);
+    for (uint32_t i = 0; i < decl->decl_struct.field_count; i++) {
+      print_indent(1);
+      printf("Field: %s\n", decl->decl_struct.fields[i].name);
+    }
+    return;
+
   case AST_DECL_INVALID:
     printf("<invalid declaration node>\n");
     return;
@@ -375,7 +383,12 @@ void debug_print_ir_function(IrFunction *func) {
 
     // Memory
     case IR_OP_ALLOC:
-      printf("%zu: r%u:%s = ALLOC %ld\n", i, instr->res.id, reg_type_name(func, instr->res), instr->int_lit);
+      printf("%zu: r%u:%s = ALLOC %u align %u\n",
+             i,
+             instr->res.id,
+             reg_type_name(func, instr->res),
+             instr->alloc.size,
+             instr->alloc.alignment);
       continue;
     case IR_OP_LOAD:
       printf("%zu: r%u:%s = LOAD [r%u]\n", i, instr->res.id, reg_type_name(func, instr->res), instr->arg1.id);

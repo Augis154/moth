@@ -157,8 +157,9 @@ static void qbe_write_op(FILE *file, const IrModule *module, const IrFunction *f
 
   // Memory
   case IR_OP_ALLOC: {
-    int align = instr.int_lit <= 4 ? 4 : 8;
-    fprintf(file, "  %%r%u =l alloc%d %ld\n", instr.res.id, align, instr.int_lit);
+    // QBE only has alloc4, alloc8 and alloc16, so a smaller alignment is rounded up to 4
+    uint32_t alignment = instr.alloc.alignment <= 4 ? 4 : instr.alloc.alignment <= 8 ? 8 : 16;
+    fprintf(file, "  %%r%u =l alloc%u %u\n", instr.res.id, alignment, instr.alloc.size);
     return;
   }
   case IR_OP_LOAD: {

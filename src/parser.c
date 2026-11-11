@@ -127,14 +127,15 @@ static void synchronize(Parser *parser) {
 
     switch (parser->current.kind) {
     case TOKEN_RBRACE:
-    case TOKEN_FN:
     case TOKEN_VAR:
+    case TOKEN_FN:
+    case TOKEN_STRUCT:
+    case TOKEN_EXTERN:
+    case TOKEN_IF:
+    case TOKEN_WHILE:
     case TOKEN_RETURN:
     case TOKEN_BREAK:
     case TOKEN_CONTINUE:
-    case TOKEN_IF:
-    case TOKEN_WHILE:
-    case TOKEN_EXTERN:
       return;
 
     default:
@@ -149,7 +150,18 @@ static void synchronize(Parser *parser) {
 static void synchronize_top_level(Parser *parser) {
   parser->panic_mode = false;
 
-  while (!check(parser, TOKEN_EOF) && !check(parser, TOKEN_FN) && !check(parser, TOKEN_EXTERN)) {
+  while (true) {
+    switch (parser->current.kind) {
+    case TOKEN_EOF:
+    case TOKEN_FN:
+    case TOKEN_STRUCT:
+    case TOKEN_EXTERN:
+      return;
+
+    default:
+      break;
+    }
+
     advance(parser);
   }
 }
@@ -979,7 +991,7 @@ static AstStmt *parse_variable_declaration(Parser *parser) {
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_LOCAL_VAR, name_token.loc);
   stmt->stmt_local_var.name = var_name;
-  stmt->stmt_local_var.declared_type = type_spec;
+  stmt->stmt_local_var.type = type_spec;
   stmt->stmt_local_var.init = init_expr;
 
   return stmt;
@@ -1110,18 +1122,22 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
 
     consume(parser, TOKEN_IDENT, "Expected parameter name in function declaration.");
     const char *param_name = parse_identifier_name(parser, parser->previous);
-    if (!param_name) return NULL;
+    if (!param_name) {
+      da_free(params);
+      return NULL;
+    }
 
     consume(parser, TOKEN_COLON, "Expected ':' after parameter name.");
     AstType *param_type = parse_type(parser);
     if (!param_type) {
       error_at(parser, parser->previous, "Expected type for parameter '%s'.", param_name);
+      da_free(params);
       return NULL;
     }
 
     AstParam param = {
       .name = param_name,
-      .declared_type = param_type,
+      .type = param_type,
       .loc = param_loc,
     };
     da_append(params, param);
@@ -1133,8 +1149,8 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
 
   consume(parser, TOKEN_RPAREN, "Expected ')' after function parameters.");
 
-  AstParam *param_array = arena_copy_array(&parser->comp_unit->arena, params, da_len(params), sizeof(AstParam));
   uint32_t param_count = da_len(params);
+  AstParam *param_array = arena_copy_array(&parser->comp_unit->arena, params, param_count, sizeof(AstParam));
   da_free(params);
 
   AstType *return_type = NULL;
@@ -1160,13 +1176,72 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
   AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_FUNCTION, start_loc);
   decl->decl_function.name = func_name;
   decl->decl_function.body = func_body;
-  decl->decl_function.declared_return_type = return_type;
+  decl->decl_function.return_type = return_type;
 
   decl->decl_function.params = param_array;
   decl->decl_function.param_count = param_count;
 
   decl->decl_function.is_extern = is_extern;
   decl->decl_function.is_variadic = is_variadic;
+
+  return decl;
+}
+
+// 'struct' IDENT '{' [ field { ',' field } [ ',' ] ] '}'  where field := IDENT ':' type
+static AstDecl *parse_struct_declaration(Parser *parser) {
+  SourceLoc start_loc = parser->current.loc;
+
+  consume(parser, TOKEN_STRUCT, "Expected 'struct' keyword for struct declaration.");
+  consume(parser, TOKEN_IDENT, "Expected struct name after 'struct'.");
+
+  const char *struct_name = parse_identifier_name(parser, parser->previous);
+  if (!struct_name) return NULL;
+
+  consume(parser, TOKEN_LBRACE, "Expected '{' after struct name.");
+
+  AstStructField *fields = NULL;
+
+  while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+    SourceLoc field_loc = parser->current.loc;
+
+    consume(parser, TOKEN_IDENT, "Expected field name in struct declaration.");
+    const char *field_name = parse_identifier_name(parser, parser->previous);
+    if (!field_name) {
+      da_free(fields);
+      return NULL;
+    }
+
+    consume(parser, TOKEN_COLON, "Expected ':' after field name.");
+    AstType *field_type = parse_type(parser);
+    if (!field_type) {
+      error_at(parser, parser->previous, "Expected type for field '%s'.", field_name);
+      da_free(fields);
+      return NULL;
+    }
+
+    AstStructField field = {
+      .name = field_name,
+      .type = field_type,
+      .loc = field_loc,
+    };
+    da_append(fields, field);
+
+    if (!match(parser, TOKEN_COMMA)) {
+      break;
+    }
+  }
+
+  consume(parser, TOKEN_RBRACE, "Expected '}' after struct declaration.");
+
+  uint32_t field_count = da_len(fields);
+  AstStructField *field_array =
+    arena_copy_array(&parser->comp_unit->arena, fields, field_count, sizeof(AstStructField));
+  da_free(fields);
+
+  AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_STRUCT, start_loc);
+  decl->decl_struct.name = struct_name;
+  decl->decl_struct.fields = field_array;
+  decl->decl_struct.field_count = field_count;
 
   return decl;
 }
@@ -1303,6 +1378,9 @@ AstDecl *parse_declaration(Parser *parser) {
   switch (parser->current.kind) {
   case TOKEN_FN:
     return parse_function_declaration(parser, false);
+
+  case TOKEN_STRUCT:
+    return parse_struct_declaration(parser);
 
   case TOKEN_EXTERN:
     return parse_extern_declaration(parser);
