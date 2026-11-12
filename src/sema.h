@@ -16,14 +16,15 @@ typedef enum {
 } SymbolKind;
 
 typedef enum {
-  SYM_UNRESOLVED,
-  SYM_RESOLVING,
-  SYM_RESOLVED,
-} SymbolResolveState;
+  SYMBOL_STATE_UNRESOLVED,
+  SYMBOL_STATE_RESOLVING,
+  SYMBOL_STATE_RESOLVED,
+} SymbolState;
 
 typedef struct {
   bool is_param;
   bool in_memory;
+  bool is_placeholder;
 } SymbolLocal;
 
 // A named entity, and the source of truth for what a name means. The AST points at its symbol and the symbol at its
@@ -37,7 +38,7 @@ struct Symbol_ {
 
   SourceLoc loc;
 
-  SymbolResolveState resolve_state;
+  SymbolState resolve_state;
 
   union {
     SymbolLocal local; // SYMBOL_LOCAL_VAR

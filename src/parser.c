@@ -1088,6 +1088,31 @@ static AstStmt *parse_while_statement(Parser *parser) {
 
 // Declaration parsing functions
 
+// IDENT ':' type  -- the shape of a parameter and of a struct field; `what` names it in errors. Returns false after
+// reporting an error.
+static bool parse_typed_name(Parser *parser, const char *what, const char **name, AstType **type) {
+  if (!match(parser, TOKEN_IDENT)) {
+    error_at(parser, parser->previous, "Expected %s name.", what);
+    return false;
+  }
+
+  *name = parse_identifier_name(parser, parser->previous);
+  if (!*name) return false;
+
+  if (!match(parser, TOKEN_COLON)) {
+    error_at(parser, parser->previous, "Expected ':' after %s name.", what);
+    return false;
+  }
+
+  *type = parse_type(parser);
+  if (!*type) {
+    error_at(parser, parser->previous, "Expected type for %s '%s'.", what, *name);
+    return false;
+  }
+
+  return true;
+}
+
 // [ 'extern' ] 'fn' IDENT '(' [ param { ',' param } [ ',' '...' | ',' ] ] ')' [ ':' type ] ( block | ';' )
 // The ';' form and the '...' parameter are only for 'extern', whose keyword parse_extern_declaration has consumed.
 static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
@@ -1120,17 +1145,9 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
       break;
     }
 
-    consume(parser, TOKEN_IDENT, "Expected parameter name in function declaration.");
-    const char *param_name = parse_identifier_name(parser, parser->previous);
-    if (!param_name) {
-      da_free(params);
-      return NULL;
-    }
-
-    consume(parser, TOKEN_COLON, "Expected ':' after parameter name.");
-    AstType *param_type = parse_type(parser);
-    if (!param_type) {
-      error_at(parser, parser->previous, "Expected type for parameter '%s'.", param_name);
+    const char *param_name;
+    AstType *param_type;
+    if (!parse_typed_name(parser, "parameter", &param_name, &param_type)) {
       da_free(params);
       return NULL;
     }
@@ -1204,17 +1221,9 @@ static AstDecl *parse_struct_declaration(Parser *parser) {
   while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
     SourceLoc field_loc = parser->current.loc;
 
-    consume(parser, TOKEN_IDENT, "Expected field name in struct declaration.");
-    const char *field_name = parse_identifier_name(parser, parser->previous);
-    if (!field_name) {
-      da_free(fields);
-      return NULL;
-    }
-
-    consume(parser, TOKEN_COLON, "Expected ':' after field name.");
-    AstType *field_type = parse_type(parser);
-    if (!field_type) {
-      error_at(parser, parser->previous, "Expected type for field '%s'.", field_name);
+    const char *field_name;
+    AstType *field_type;
+    if (!parse_typed_name(parser, "field", &field_name, &field_type)) {
       da_free(fields);
       return NULL;
     }

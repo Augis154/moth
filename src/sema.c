@@ -48,7 +48,8 @@ static void scope_exit(SemaContext *ctx, uint32_t outer_start) {
   ctx->scope_depth--;
 }
 
-// Allocates a symbol; `name` must be interned. It is not added to any scope.
+// Allocates a symbol; `name` must be interned. It is not added to any scope. A local of an aggregate type always lives
+// in memory.
 static Symbol *symbol_new(SemaContext *ctx, const char *name, SymbolKind kind, Type *type, SourceLoc loc) {
   Symbol *sym = arena_alloc(&ctx->comp_unit->arena, sizeof(Symbol));
   *sym = (Symbol){
@@ -58,6 +59,11 @@ static Symbol *symbol_new(SemaContext *ctx, const char *name, SymbolKind kind, T
     .name = name,
     .type = type,
   };
+
+  if (kind == SYMBOL_LOCAL_VAR && type_is_aggregate(type)) {
+    sym->local.in_memory = true;
+  }
+
   return sym;
 }
 
@@ -129,21 +135,56 @@ static Symbol *scope_insert(SemaContext *ctx, const char *name, SymbolKind kind,
   return sym;
 }
 
-// The line where `name` was first declared in the current scope, for "Previous declaration" notes; 0 if it is unknown.
-static uint32_t previous_declaration_line(SemaContext *ctx, const char *name) {
-  Symbol *existing = scope_lookup_current(ctx, name);
-  return existing ? existing->loc.line : 0;
+// Reports that a declaration repeats the name of `existing`, with the line of the first declaration. A builtin type has
+// no source line.
+static void sema_error_redeclaration(SemaContext *ctx, SourceLoc loc, const Symbol *existing_sym) {
+  if (existing_sym->loc.line == 0) {
+    sema_error(ctx, loc, "'%s' is a builtin type and cannot be redeclared", existing_sym->name);
+  } else {
+    sema_error(
+      ctx, loc, "Redeclaration of '%s'. Previous declaration at line %u", existing_sym->name, existing_sym->loc.line);
+  }
 }
 
-// Reports an error if `name` is a type name.
-static bool sema_reject_type_name(SemaContext *ctx, const char *name, SourceLoc loc) {
-  Symbol *existing = scope_lookup(ctx, name);
-  if (!existing || existing->kind != SYMBOL_TYPE) {
-    return false;
+// Declares a local or parameter, or reports an error and returns NULL if its name is visible already or names a type.
+// The name is then declared as the error type, so its uses report nothing more. A function can be shadowed.
+static Symbol *sema_declare_local(SemaContext *ctx, const char *name, Type *type, SourceLoc loc) {
+  Symbol *existing_sym = scope_lookup_current(ctx, name);
+
+  // The name was used before this declaration, which was reported already; the declaration takes the placeholder over
+  if (existing_sym && existing_sym->kind == SYMBOL_LOCAL_VAR && existing_sym->local.is_placeholder) {
+    existing_sym->type = type;
+    existing_sym->loc = loc;
+    existing_sym->local = (SymbolLocal){.in_memory = type_is_aggregate(type)};
+    return existing_sym;
   }
 
-  sema_error(ctx, loc, "'%s' is a type name and cannot be used as a variable name", name);
-  return true;
+  if (!existing_sym) {
+    Symbol *visible_sym = scope_lookup(ctx, name);
+    bool is_type = visible_sym && visible_sym->kind == SYMBOL_TYPE;
+    bool is_local = visible_sym && visible_sym->kind == SYMBOL_LOCAL_VAR && !visible_sym->local.is_placeholder;
+
+    existing_sym = is_type || is_local ? visible_sym : NULL;
+  }
+
+  if (existing_sym) {
+    sema_error_redeclaration(ctx, loc, existing_sym);
+    scope_insert(ctx, name, SYMBOL_LOCAL_VAR, type_error, loc);
+    return NULL;
+  }
+
+  return scope_insert(ctx, name, SYMBOL_LOCAL_VAR, type, loc);
+}
+
+// Returns `type` if a value of it can be stored, which a variable, parameter or field needs; otherwise reports it and
+// returns the error type. `what` names the declaration, such as "variable".
+static Type *sema_require_storage(SemaContext *ctx, SourceLoc loc, const char *what, const char *name, Type *type) {
+  if (type_has_storage(type)) {
+    return type;
+  }
+
+  sema_error(ctx, loc, "Cannot declare %s '%s' of type '%s'", what, name, type_display_name(type));
+  return type_error;
 }
 
 static inline size_t align_to(size_t offset, size_t align) {
@@ -483,7 +524,8 @@ static Type *sema_expr_identifier(SemaContext *ctx, AstExpr *expr) {
   if (!sym) {
     sema_error(ctx, expr->loc, "Undefined identifier '%s'", expr->expr_identifier.name);
 
-    scope_insert(ctx, expr->expr_identifier.name, SYMBOL_LOCAL_VAR, type_error, expr->loc);
+    Symbol *placeholder_sym = scope_insert(ctx, expr->expr_identifier.name, SYMBOL_LOCAL_VAR, type_error, expr->loc);
+    placeholder_sym->local.is_placeholder = true;
     return type_error;
   }
 
@@ -961,12 +1003,26 @@ static Type *sema_expr_call(SemaContext *ctx, AstExpr *expr) {
     return type_error;
   }
 
+  // A name whose declaration failed is declared as the error type, and was reported already
+  if (func_sym->kind == SYMBOL_LOCAL_VAR && func_sym->type == type_error) {
+    sema_call_arguments(ctx, expr);
+    return type_error;
+  }
+
   if (func_sym->kind != SYMBOL_FUNCTION) {
-    sema_error(ctx,
-               expr->loc,
-               "'%s' is a %s, not a function",
-               callee->expr_identifier.name,
-               func_sym->kind == SYMBOL_TYPE ? "type" : "variable");
+    const char *what = func_sym->kind == SYMBOL_TYPE ? "a type" : "a variable";
+
+    if (func_sym->loc.line == 0) {
+      sema_error(ctx, expr->loc, "'%s' is a builtin type, not a function", callee->expr_identifier.name);
+    } else {
+      sema_error(ctx,
+                 expr->loc,
+                 "'%s' is %s (declared at line %u), not a function",
+                 callee->expr_identifier.name,
+                 what,
+                 func_sym->loc.line);
+    }
+
     sema_call_arguments(ctx, expr);
     return type_error;
   }
@@ -1508,12 +1564,19 @@ Type *sema_expr_hint(SemaContext *ctx, AstExpr *expr, Type *hint) {
 
 // Statement semantic analysis functions
 
-static void sema_stmt_block(SemaContext *ctx, AstStmt *stmt) {
-  uint32_t outer_start = scope_enter(ctx);
+// Analyses the statements of a block in the current scope.
+static void sema_block_statements(SemaContext *ctx, AstStmt *stmt) {
+  assert(stmt->kind == AST_STMT_BLOCK && "sema_block_statements: statement is not a block");
 
   for (uint32_t i = 0; i < stmt->stmt_block.statement_count; i++) {
     sema_stmt(ctx, stmt->stmt_block.statements[i]);
   }
+}
+
+static void sema_stmt_block(SemaContext *ctx, AstStmt *stmt) {
+  uint32_t outer_start = scope_enter(ctx);
+
+  sema_block_statements(ctx, stmt);
 
   scope_exit(ctx, outer_start);
 }
@@ -1585,8 +1648,6 @@ static Type *sema_local_var_type(SemaContext *ctx, AstStmt *stmt) {
 // Declares a variable; the type comes from the annotation or the initializer, which is converted to it. `undef` needs
 // an annotation and is not converted.
 static void sema_stmt_local_var(SemaContext *ctx, AstStmt *stmt) {
-  bool reuses_type_name = sema_reject_type_name(ctx, stmt->stmt_local_var.name, stmt->loc);
-
   Type *expected_type = sema_local_var_type(ctx, stmt);
   Type *init_type = stmt->stmt_local_var.init ? sema_expr_type(ctx, stmt->stmt_local_var.init) : NULL;
 
@@ -1602,14 +1663,7 @@ static void sema_stmt_local_var(SemaContext *ctx, AstStmt *stmt) {
     var_type = type_error;
   }
 
-  if (!type_has_storage(var_type)) {
-    sema_error(ctx,
-               stmt->loc,
-               "Cannot declare variable '%s' of type '%s'",
-               stmt->stmt_local_var.name,
-               type_display_name(var_type));
-    var_type = type_error;
-  }
+  var_type = sema_require_storage(ctx, stmt->loc, "variable", stmt->stmt_local_var.name, var_type);
 
   if (expected_type && init_type && !is_undef && !type_can_widen_to(init_type, var_type)) {
     sema_error(ctx,
@@ -1618,7 +1672,7 @@ static void sema_stmt_local_var(SemaContext *ctx, AstStmt *stmt) {
                type_display_name(init_type),
                type_display_name(var_type));
 
-    scope_insert(ctx, stmt->stmt_local_var.name, SYMBOL_LOCAL_VAR, type_error, stmt->loc);
+    sema_declare_local(ctx, stmt->stmt_local_var.name, type_error, stmt->loc);
     return;
   }
 
@@ -1626,27 +1680,7 @@ static void sema_stmt_local_var(SemaContext *ctx, AstStmt *stmt) {
     sema_coerce(ctx, &stmt->stmt_local_var.init, var_type);
   }
 
-  if (reuses_type_name) {
-    var_type = type_error;
-  }
-
-  Symbol *sym = scope_insert(ctx, stmt->stmt_local_var.name, SYMBOL_LOCAL_VAR, var_type, stmt->loc);
-  if (!sym) {
-    if (!reuses_type_name) {
-      sema_error(ctx,
-                 stmt->loc,
-                 "Redeclaration of '%s' in current scope. Previous declaration at line %u",
-                 stmt->stmt_local_var.name,
-                 previous_declaration_line(ctx, stmt->stmt_local_var.name));
-    }
-    return;
-  }
-
-  if (type_is_aggregate(var_type)) {
-    sym->local.in_memory = true;
-  }
-
-  stmt->stmt_local_var.symbol = sym;
+  stmt->stmt_local_var.symbol = sema_declare_local(ctx, stmt->stmt_local_var.name, var_type, stmt->loc);
 }
 
 static void sema_stmt_return(SemaContext *ctx, AstStmt *stmt) {
@@ -1746,28 +1780,17 @@ void sema_stmt(SemaContext *ctx, AstStmt *stmt) {
 
 // Declaration semantic analysis functions
 
-// Pass 1: Symbol discovery
+// Declarations are analysed in three stages: declare puts every name in scope, resolve works out types and layouts on
+// demand, and check analyses the function bodies.
+
+// Declare: names
 
 // Declares a top-level name and links its symbol to `decl`. A redeclaration is reported and gets a symbol that is in
 // no scope, so the declaration can still be analysed.
-static Symbol *sema_declare(SemaContext *ctx, AstDecl *decl, const char *name, SymbolKind kind, Type *type,
-                            const char *what) {
+static Symbol *sema_declare(SemaContext *ctx, AstDecl *decl, const char *name, SymbolKind kind, Type *type) {
   Symbol *sym = scope_insert(ctx, name, kind, type, decl->loc);
   if (!sym) {
-    uint32_t previous_line = previous_declaration_line(ctx, name);
-
-    // Only a builtin type is declared without a source line
-    if (previous_line == 0) {
-      sema_error(ctx, decl->loc, "Cannot declare %s '%s': the name is a builtin type", what, name);
-    } else {
-      sema_error(ctx,
-                 decl->loc,
-                 "Redeclaration of %s '%s' in current scope. Previous declaration at line %u",
-                 what,
-                 name,
-                 previous_line);
-    }
-
+    sema_error_redeclaration(ctx, decl->loc, scope_lookup_current(ctx, name));
     sym = symbol_new(ctx, name, kind, type, decl->loc);
   }
 
@@ -1776,30 +1799,67 @@ static Symbol *sema_declare(SemaContext *ctx, AstDecl *decl, const char *name, S
   return sym;
 }
 
-// Pass 1: resolves the signature and declares the function globally so it can be called before its definition.
-static void sema_pass1_decl_function(SemaContext *ctx, AstDecl *decl) {
+// Declares a function with an empty type, which `sema_resolve_function` fills in.
+static void sema_declare_function(SemaContext *ctx, AstDecl *decl) {
   AstDeclFunction *func_decl = &decl->decl_function;
+
+  Type *func_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
+  *func_type = (Type){
+    .kind = TYPE_KIND_FUNCTION,
+    .name = func_decl->name,
+  };
+
+  func_decl->symbol = sema_declare(ctx, decl, func_decl->name, SYMBOL_FUNCTION, func_type);
+}
+
+// Declares a struct with an empty type, which `sema_resolve_struct` fills in. Types that name it by pointer can
+// already refer to that type.
+static void sema_declare_struct(SemaContext *ctx, AstDecl *decl) {
+  AstDeclStruct *struct_decl = &decl->decl_struct;
+
+  Type *struct_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
+  *struct_type = (Type){
+    .kind = TYPE_KIND_STRUCT,
+    .name = struct_decl->name,
+  };
+
+  struct_decl->symbol = sema_declare(ctx, decl, struct_decl->name, SYMBOL_TYPE, struct_type);
+}
+
+static void sema_declare_decl(SemaContext *ctx, AstDecl *decl) {
+  switch (decl->kind) {
+  case AST_DECL_FUNCTION:
+    sema_declare_function(ctx, decl);
+    break;
+
+  case AST_DECL_STRUCT:
+    sema_declare_struct(ctx, decl);
+    break;
+
+  case AST_DECL_INVALID:
+    sema_error(ctx, decl->loc, "Invalid declaration");
+    break;
+  }
+}
+
+// Resolve: types
+
+// Resolves the signature of a function into the type that was declared for it.
+static void sema_resolve_function(SemaContext *ctx, AstDecl *decl) {
+  AstDeclFunction *func_decl = &decl->decl_function;
+  Symbol *sym = func_decl->symbol;
 
   Type *return_type = sema_type(ctx, func_decl->return_type);
 
   Type **param_types = arena_alloc(&ctx->comp_unit->arena, sizeof(Type *) * func_decl->param_count);
   for (uint32_t i = 0; i < func_decl->param_count; i++) {
-    param_types[i] = sema_type(ctx, func_decl->params[i].type);
-
-    if (!type_has_storage(param_types[i])) {
-      sema_error(ctx,
-                 func_decl->params[i].loc,
-                 "Cannot declare parameter '%s' of type '%s'",
-                 func_decl->params[i].name,
-                 type_display_name(param_types[i]));
-      param_types[i] = type_error;
-    }
+    AstParam *param = &func_decl->params[i];
+    param_types[i] = sema_require_storage(ctx, param->loc, "parameter", param->name, sema_type(ctx, param->type));
   }
 
-  Type *func_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
-  *func_type = (Type){
+  *sym->type = (Type){
     .kind = TYPE_KIND_FUNCTION,
-    .name = "Function",
+    .name = func_decl->name,
     .function =
       {
         .return_type = return_type,
@@ -1808,14 +1868,32 @@ static void sema_pass1_decl_function(SemaContext *ctx, AstDecl *decl) {
         .is_variadic = func_decl->is_variadic,
       },
   };
-
-  func_decl->symbol = sema_declare(ctx, decl, func_decl->name, SYMBOL_FUNCTION, func_type, "function");
 }
 
-// Pass 1: lays out the fields and declares the struct globally. A struct with an invalid field becomes the error
-// type, so that its uses report nothing more.
-static void sema_pass1_decl_struct(SemaContext *ctx, AstDecl *decl) {
+// Reports field `index` of a struct if an earlier field has the same name; returns whether it is a duplicate.
+static bool sema_is_duplicate_field(SemaContext *ctx, const AstDeclStruct *struct_decl, uint32_t index) {
+  const AstStructField *field = &struct_decl->fields[index];
+
+  for (uint32_t i = 0; i < index; i++) {
+    if (struct_decl->fields[i].name != field->name) continue;
+
+    sema_error(ctx,
+               field->loc,
+               "Duplicate field '%s' in struct '%s'. Previous declaration at line %u",
+               field->name,
+               struct_decl->name,
+               struct_decl->fields[i].loc.line);
+    return true;
+  }
+
+  return false;
+}
+
+// Lays out the fields of a struct into the type that was declared for it. A struct with an invalid field gets a dummy
+// size, so its uses report nothing more.
+static void sema_resolve_struct(SemaContext *ctx, AstDecl *decl) {
   AstDeclStruct *struct_decl = &decl->decl_struct;
+  Symbol *sym = struct_decl->symbol;
 
   uint32_t field_count = struct_decl->field_count;
   TypeField *fields = arena_alloc(&ctx->comp_unit->arena, sizeof(TypeField) * field_count);
@@ -1824,28 +1902,17 @@ static void sema_pass1_decl_struct(SemaContext *ctx, AstDecl *decl) {
   uint32_t max_align = 1;
   bool fields_ok = true;
 
+  if (field_count == 0) {
+    sema_error(ctx, decl->loc, "Struct '%s' has no fields", struct_decl->name);
+    fields_ok = false;
+  }
+
   for (uint32_t i = 0; i < field_count; i++) {
-    Type *field_type = sema_type(ctx, struct_decl->fields[i].type);
+    AstStructField *field = &struct_decl->fields[i];
 
-    if (!type_has_storage(field_type)) {
-      sema_error(ctx,
-                 struct_decl->fields[i].loc,
-                 "Cannot declare field '%s' of type '%s' in struct '%s'",
-                 struct_decl->fields[i].name,
-                 type_display_name(field_type),
-                 struct_decl->name);
-      field_type = type_error;
-    }
+    Type *field_type = sema_require_storage(ctx, field->loc, "field", field->name, sema_type(ctx, field->type));
 
-    for (uint32_t j = 0; j < i; j++) {
-      if (struct_decl->fields[i].name != struct_decl->fields[j].name) continue;
-
-      sema_error(ctx,
-                 struct_decl->fields[i].loc,
-                 "Duplicate field '%s' in struct '%s'. Previous declaration at line %d",
-                 struct_decl->fields[i].name,
-                 struct_decl->name,
-                 struct_decl->fields[j].loc.line);
+    if (sema_is_duplicate_field(ctx, struct_decl, i)) {
       field_type = type_error;
     }
 
@@ -1855,21 +1922,16 @@ static void sema_pass1_decl_struct(SemaContext *ctx, AstDecl *decl) {
 
     current_offset = align_to(current_offset, field_type->alignment);
 
-    fields[i].name = struct_decl->fields[i].name;
-    fields[i].type = field_type;
-    fields[i].offset = current_offset;
+    fields[i] = (TypeField){.name = field->name, .type = field_type, .offset = current_offset};
 
     current_offset += field_type->size;
-
-    if (field_type->alignment > max_align) {
-      max_align = field_type->alignment;
-    }
+    max_align = field_type->alignment > max_align ? field_type->alignment : max_align;
   }
 
   uint32_t total_size = align_to(current_offset, max_align);
+  total_size = total_size > 0 || fields_ok ? total_size : 1;
 
-  Type *struct_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
-  *struct_type = (Type){
+  *sym->type = (Type){
     .kind = TYPE_KIND_STRUCT,
     .name = struct_decl->name,
     .size = total_size,
@@ -1880,35 +1942,47 @@ static void sema_pass1_decl_struct(SemaContext *ctx, AstDecl *decl) {
         .field_count = field_count,
       },
   };
-
-  if (!fields_ok) {
-    struct_type = type_error;
-  }
-
-  struct_decl->symbol = sema_declare(ctx, decl, struct_decl->name, SYMBOL_TYPE, struct_type, "struct");
 }
 
-static void sema_pass1_decl(SemaContext *ctx, AstDecl *decl) {
-  switch (decl->kind) {
+// Resolves the type of the declaration `sym` names, once. Returns false if the declaration needs itself to be
+// resolved, so a struct that contains itself by value is reported.
+static bool sema_resolve_symbol(SemaContext *ctx, Symbol *sym) {
+  assert(sym && "sema_resolve_symbol: symbol is NULL");
+
+  if (sym->resolve_state == SYMBOL_STATE_RESOLVED) return true;
+
+  if (sym->resolve_state == SYMBOL_STATE_RESOLVING) {
+    sema_error(ctx, sym->loc, "'%s' depends on itself", sym->name);
+    return false;
+  }
+
+  // Builtin types, locals and parameters have nothing to resolve
+  if (!sym->decl) return true;
+
+  sym->resolve_state = SYMBOL_STATE_RESOLVING;
+
+  switch (sym->decl->kind) {
   case AST_DECL_FUNCTION:
-    sema_pass1_decl_function(ctx, decl);
+    sema_resolve_function(ctx, sym->decl);
     break;
 
   case AST_DECL_STRUCT:
-    sema_pass1_decl_struct(ctx, decl);
+    sema_resolve_struct(ctx, sym->decl);
     break;
 
   case AST_DECL_INVALID:
-    sema_error(ctx, decl->loc, "Invalid declaration");
-    break;
+    UNREACHABLE("sema_resolve_symbol: invalid declaration");
   }
+
+  sym->resolve_state = SYMBOL_STATE_RESOLVED;
+  return true;
 }
 
-// Pass 2: Type checking and validation
+// Check: function bodies
 
-// Pass 2: declares the parameters in a new scope and analyses the function body.
-static void sema_pass2_decl_function(SemaContext *ctx, AstDecl *decl) {
-  assert(decl->decl_function.symbol && "pass 1 declares every function");
+// Declares the parameters in a new scope and analyses the function body.
+static void sema_check_function(SemaContext *ctx, AstDecl *decl) {
+  assert(decl->decl_function.symbol && "declare creates the symbol of every function");
 
   AstDeclFunction *func_decl = &decl->decl_function;
   AstDeclFunction *prev_func = ctx->current_function;
@@ -1926,61 +2000,47 @@ static void sema_pass2_decl_function(SemaContext *ctx, AstDecl *decl) {
     AstParam *param = &func_decl->params[i];
     Type *param_type = func_type->function.param_types[i];
 
-    if (sema_reject_type_name(ctx, param->name, param->loc)) {
-      scope_insert(ctx, param->name, SYMBOL_LOCAL_VAR, type_error, param->loc);
-      continue;
-    }
-
-    Symbol *sym = scope_insert(ctx, param->name, SYMBOL_LOCAL_VAR, param_type, param->loc);
-
-    if (!sym) {
-      sema_error(ctx,
-                 param->loc,
-                 "Redeclaration of parameter '%s' in function '%s'. Previous declaration at line %u",
-                 param->name,
-                 func_decl->name,
-                 previous_declaration_line(ctx, param->name));
-      continue;
-    }
+    Symbol *sym = sema_declare_local(ctx, param->name, param_type, param->loc);
+    if (!sym) continue;
 
     sym->local.is_param = true;
-
-    if (type_is_aggregate(param_type)) {
-      sym->local.in_memory = true;
-    }
-
     param->symbol = sym;
   }
 
-  sema_stmt(ctx, func_decl->body);
+  // The body shares the scope of the parameters, so a local cannot repeat the name of a parameter
+  sema_block_statements(ctx, func_decl->body);
 
   scope_exit(ctx, outer_start);
   ctx->current_function = prev_func;
 }
 
-static void sema_pass2_decl(SemaContext *ctx, AstDecl *decl) {
+static void sema_check_decl(SemaContext *ctx, AstDecl *decl) {
   switch (decl->kind) {
-  case AST_DECL_FUNCTION: {
-    return sema_pass2_decl_function(ctx, decl);
-  }
+  case AST_DECL_FUNCTION:
+    sema_check_function(ctx, decl);
+    break;
 
   case AST_DECL_STRUCT:
   case AST_DECL_INVALID:
-    return;
+    break;
   }
-
-  sema_error(ctx, decl->loc, "Unknown declaration type");
 }
 
 // Type semantic analysis functions
 
+static Type *sema_type_impl(SemaContext *ctx, AstType *type, bool need_complete);
+
 // Resolves a type name such as i32.
-static Type *sema_type_named(SemaContext *ctx, AstType *type) {
+static Type *sema_type_named(SemaContext *ctx, AstType *type, bool need_complete) {
   assert(type->named && "the parser always provides the name of a named type");
 
   Symbol *sym = scope_lookup_type_name(ctx, type->named);
   if (!sym) {
     sema_error(ctx, type->loc, "Undefined type '%s'", type->named);
+    return type_error;
+  }
+
+  if (need_complete && !sema_resolve_symbol(ctx, sym)) {
     return type_error;
   }
 
@@ -1994,8 +2054,10 @@ static Type *sema_type_named(SemaContext *ctx, AstType *type) {
 }
 
 // Resolves `*T`.
-static Type *sema_type_pointer(SemaContext *ctx, AstType *type) {
-  Type *base_type = sema_type(ctx, type->pointer.base_type);
+static Type *sema_type_pointer(SemaContext *ctx, AstType *type, bool need_complete) {
+  UNUSED(need_complete);
+
+  Type *base_type = sema_type_impl(ctx, type->pointer.base_type, false);
 
   if (base_type == type_error) {
     return type_error;
@@ -2005,13 +2067,13 @@ static Type *sema_type_pointer(SemaContext *ctx, AstType *type) {
 }
 
 // Resolves `[N]T`: the size must be a positive integer literal.
-static Type *sema_type_array(SemaContext *ctx, AstType *type) {
+static Type *sema_type_array(SemaContext *ctx, AstType *type, bool need_complete) {
   if (!type->array.length_expr) {
     sema_error(ctx, type->loc, "Array with inferred length '[_]' must have an initializer");
     return type_error;
   }
 
-  Type *element_type = sema_type(ctx, type->array.elem_type);
+  Type *element_type = sema_type_impl(ctx, type->array.elem_type, need_complete);
   Type *size_type = sema_expr(ctx, type->array.length_expr);
 
   if (element_type == type_error || size_type == type_error) {
@@ -2040,8 +2102,10 @@ static Type *sema_type_array(SemaContext *ctx, AstType *type) {
 }
 
 // Resolves `[]T`.
-static Type *sema_type_slice(SemaContext *ctx, AstType *type) {
-  Type *base_type = sema_type(ctx, type->slice.elem_type);
+static Type *sema_type_slice(SemaContext *ctx, AstType *type, bool need_complete) {
+  UNUSED(need_complete);
+
+  Type *base_type = sema_type_impl(ctx, type->slice.elem_type, false);
 
   if (base_type == type_error) {
     return type_error;
@@ -2055,8 +2119,7 @@ static Type *sema_type_slice(SemaContext *ctx, AstType *type) {
   return type_slice_of(&ctx->comp_unit->arena, base_type);
 }
 
-// Resolves a written type to a Type: no type means void.
-Type *sema_type(SemaContext *ctx, AstType *type) {
+static Type *sema_type_impl(SemaContext *ctx, AstType *type, bool need_complete) {
   if (!type) {
     return type_void;
   }
@@ -2066,17 +2129,22 @@ Type *sema_type(SemaContext *ctx, AstType *type) {
     sema_error(ctx, type->loc, "Invalid type");
     return type_error;
   case AST_TYPE_NAMED:
-    return sema_type_named(ctx, type);
+    return sema_type_named(ctx, type, need_complete);
   case AST_TYPE_POINTER:
-    return sema_type_pointer(ctx, type);
+    return sema_type_pointer(ctx, type, need_complete);
   case AST_TYPE_ARRAY:
-    return sema_type_array(ctx, type);
+    return sema_type_array(ctx, type, need_complete);
   case AST_TYPE_SLICE:
-    return sema_type_slice(ctx, type);
+    return sema_type_slice(ctx, type, need_complete);
   }
 
   sema_error(ctx, type->loc, "Unknown type kind");
   return type_error;
+}
+
+// Resolves a written type to a Type: no type means void.
+Type *sema_type(SemaContext *ctx, AstType *type) {
+  return sema_type_impl(ctx, type, true);
 }
 
 // Semantic analysis functions
@@ -2114,13 +2182,33 @@ void sema_free(SemaContext *ctx) {
   da_free(ctx->expr_types);
 }
 
-// Runs pass 1 over all declarations, then pass 2
+// The symbol a declaration introduced.
+static Symbol *decl_symbol(const AstDecl *decl) {
+  switch (decl->kind) {
+  case AST_DECL_FUNCTION:
+    return decl->decl_function.symbol;
+
+  case AST_DECL_STRUCT:
+    return decl->decl_struct.symbol;
+
+  case AST_DECL_INVALID:
+    break;
+  }
+
+  UNREACHABLE("decl_symbol: invalid declaration");
+}
+
+// Runs the three stages over all declarations: declare, resolve and check.
 void sema_program(SemaContext *ctx, AstProgram *program) {
   for (uint32_t i = 0; i < program->decl_count; i++) {
-    sema_pass1_decl(ctx, program->decls[i]);
+    sema_declare_decl(ctx, program->decls[i]);
   }
 
   for (uint32_t i = 0; i < program->decl_count; i++) {
-    sema_pass2_decl(ctx, program->decls[i]);
+    sema_resolve_symbol(ctx, decl_symbol(program->decls[i]));
+  }
+
+  for (uint32_t i = 0; i < program->decl_count; i++) {
+    sema_check_decl(ctx, program->decls[i]);
   }
 }
