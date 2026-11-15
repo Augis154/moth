@@ -160,8 +160,8 @@ typedef struct {
 
 typedef struct {
   AstExpr *callee;
-  AstExpr **arguments;
-  uint32_t argument_count;
+  AstExpr **args;
+  uint32_t arg_count;
 } AstExprCall;
 
 typedef struct {
@@ -183,7 +183,7 @@ typedef struct {
 
 typedef struct {
   AstExpr *operand;
-  AstType *target;
+  AstType *target_type;
   bool implicit;
 } AstExprCast;
 
@@ -237,8 +237,8 @@ typedef enum {
 } AstStmtKind;
 
 typedef struct {
-  AstStmt **statements;
-  uint32_t statement_count;
+  AstStmt **stmts;
+  uint32_t stmt_count;
 } AstStmtBlock;
 
 typedef struct {
@@ -354,6 +354,10 @@ typedef enum {
 } AstTypeKind;
 
 typedef struct {
+  const char *name;
+} AstTypeNamed;
+
+typedef struct {
   AstType *base_type;
 } AstTypePointer;
 
@@ -372,10 +376,10 @@ struct AstType_ {
   SourceLoc loc;
 
   union {
-    const char *named;
-    AstTypePointer pointer;
-    AstTypeArray array;
-    AstTypeSlice slice;
+    AstTypeNamed type_named;
+    AstTypePointer type_pointer;
+    AstTypeArray type_array;
+    AstTypeSlice type_slice;
   };
 };
 

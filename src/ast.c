@@ -38,13 +38,13 @@ AstDecl *ast_decl_new(Arena *arena, AstDeclKind kind, SourceLoc loc) {
 }
 
 AstType *ast_type_new(Arena *arena, AstTypeKind kind, SourceLoc loc) {
-  AstType *type = arena_calloc(arena, sizeof(AstType));
+  AstType *ast_type = arena_calloc(arena, sizeof(AstType));
 
-  type->kind = kind;
-  type->id = type_id++;
-  type->loc = loc;
+  ast_type->kind = kind;
+  ast_type->id = type_id++;
+  ast_type->loc = loc;
 
-  return type;
+  return ast_type;
 }
 
 // Node counts

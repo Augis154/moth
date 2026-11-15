@@ -225,45 +225,46 @@ bool type_equals(Type *a, Type *b) {
   return false;
 }
 
-// Implicit conversions: every value of `from` is representable in `to`
-bool type_can_widen_to(Type *from, Type *to) {
-  if (!from || !to) return false;
-  if (type_equals(from, to)) return true;
+// Implicit conversions: every value of `from_type` is representable in `to_type`
+bool type_can_widen_to(Type *from_type, Type *to_type) {
+  if (!from_type || !to_type) return false;
+  if (type_equals(from_type, to_type)) return true;
 
-  if (from == type_null) return type_is_pointer(to);
-  if (to == type_null) return false;
+  if (from_type == type_null) return type_is_pointer(to_type);
+  if (to_type == type_null) return false;
 
-  if (to == type_untyped_int) return false;
-  if (to == type_untyped_float) return from == type_untyped_int;
+  if (to_type == type_untyped_int) return false;
+  if (to_type == type_untyped_float) return from_type == type_untyped_int;
 
-  if (from == type_untyped_int) return type_is_integer(to) || type_is_float(to);
-  if (from == type_untyped_float) return type_is_float(to);
+  if (from_type == type_untyped_int) return type_is_integer(to_type) || type_is_float(to_type);
+  if (from_type == type_untyped_float) return type_is_float(to_type);
 
-  if (type_is_integer(from) && type_is_integer(to)) {
-    if (type_is_signed_integer(from)) return type_is_signed_integer(to) && to->size >= from->size;
-    return type_is_unsigned_integer(to) ? to->size >= from->size : to->size > from->size;
+  if (type_is_integer(from_type) && type_is_integer(to_type)) {
+    if (type_is_signed_integer(from_type)) return type_is_signed_integer(to_type) && to_type->size >= from_type->size;
+    return type_is_unsigned_integer(to_type) ? to_type->size >= from_type->size : to_type->size > from_type->size;
   }
 
-  if (type_is_float(from) && type_is_float(to)) {
-    return to->size >= from->size;
+  if (type_is_float(from_type) && type_is_float(to_type)) {
+    return to_type->size >= from_type->size;
   }
 
-  if (type_is_integer(from) && type_is_float(to)) {
-    return to->size >= from->size;
+  if (type_is_integer(from_type) && type_is_float(to_type)) {
+    return to_type->size >= from_type->size;
   }
 
   // Any pointer converts implicitly to `*void`; the way back needs an explicit cast.
-  if (type_is_pointer(from) && type_is_pointer(to)) {
-    return type_is_void(to->pointer.base_type);
+  if (type_is_pointer(from_type) && type_is_pointer(to_type)) {
+    return type_is_void(to_type->pointer.base_type);
   }
 
   // An array converts to a pointer to its elements (or to `*void`); it is already represented by its address.
-  if (type_is_array(from) && type_is_pointer(to)) {
-    return type_is_void(to->pointer.base_type) || type_equals(from->array.elem_type, to->pointer.base_type);
+  if (type_is_array(from_type) && type_is_pointer(to_type)) {
+    return type_is_void(to_type->pointer.base_type) ||
+           type_equals(from_type->array.elem_type, to_type->pointer.base_type);
   }
 
-  if (type_is_array(from) && type_is_slice(to)) {
-    return type_equals(from->array.elem_type, to->slice.elem_type);
+  if (type_is_array(from_type) && type_is_slice(to_type)) {
+    return type_equals(from_type->array.elem_type, to_type->slice.elem_type);
   }
 
   return false;

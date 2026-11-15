@@ -21,10 +21,10 @@ typedef struct {
   bool had_error;
 } CompilationUnit;
 
-void cu_init(CompilationUnit *comp_unit);
-void cu_free(CompilationUnit *comp_unit);
+void comp_unit_init(CompilationUnit *comp_unit);
+void comp_unit_free(CompilationUnit *comp_unit);
 
-void cu_read_source_file(CompilationUnit *comp_unit, const char *filename);
+void comp_unit_read_source_file(CompilationUnit *comp_unit, const char *filename);
 
 bool compile_file(const char *input_path, const char *output_path);
 

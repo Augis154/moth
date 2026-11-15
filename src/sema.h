@@ -69,7 +69,7 @@ Type *sema_expr_type(const SemaContext *ctx, const AstExpr *expr);
 Type *sema_expr(SemaContext *ctx, AstExpr *expr);
 Type *sema_expr_hint(SemaContext *ctx, AstExpr *expr, Type *hint);
 void sema_stmt(SemaContext *ctx, AstStmt *stmt);
-Type *sema_type(SemaContext *ctx, AstType *type);
+Type *sema_type(SemaContext *ctx, AstType *ast_type);
 
 void sema_program(SemaContext *ctx, AstProgram *program);
 

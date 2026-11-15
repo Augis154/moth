@@ -75,7 +75,7 @@ typedef struct {
 typedef struct {
   TypeField *fields;
   uint32_t field_count;
-} TypeStructure;
+} TypeStruct;
 
 struct Type_ {
   TypeKind kind;
@@ -88,7 +88,7 @@ struct Type_ {
     TypeArray array;
     TypeSlice slice;
     TypeFunction function;
-    TypeStructure structure;
+    TypeStruct structure;
   };
 };
 
@@ -137,8 +137,8 @@ bool type_is_orderable(Type *type);
 // Relations between types
 // Same type; pointers and arrays are compared by their element types (and length)
 bool type_equals(Type *a, Type *b);
-// Whether a value of `from` converts implicitly to `to`
-bool type_can_widen_to(Type *from, Type *to);
+// Whether a value of `from_type` converts implicitly to `to_type`
+bool type_can_widen_to(Type *from_type, Type *to_type);
 // The type both operands convert to, or NULL when they have none
 Type *type_common(Type *a, Type *b);
 

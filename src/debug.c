@@ -39,7 +39,7 @@ void debug_print_token(Token token) {
 
 // AST printing functions
 
-void debug_print_ast_sexpr(Arena *arena, AstExpr *expr) {
+void debug_print_ast_expr(Arena *arena, AstExpr *expr) {
   if (!expr) {
     printf("<null expr>\n");
     return;
@@ -87,9 +87,9 @@ void debug_print_ast_sexpr(Arena *arena, AstExpr *expr) {
     printf("(array-literal ");
     if (expr->expr_array_literal.is_repeat) {
       printf("(repeat ");
-      debug_print_ast_sexpr(arena, expr->expr_array_literal.repeat.value);
+      debug_print_ast_expr(arena, expr->expr_array_literal.repeat.value);
       printf(" ");
-      debug_print_ast_sexpr(arena, expr->expr_array_literal.repeat.length_expr);
+      debug_print_ast_expr(arena, expr->expr_array_literal.repeat.length_expr);
       printf(")");
     } else {
       printf("(list ");
@@ -97,12 +97,12 @@ void debug_print_ast_sexpr(Arena *arena, AstExpr *expr) {
         AstArrayElement *elem = &expr->expr_array_literal.list.elements[i];
         if (elem->index_expr) {
           printf("(sparse ");
-          debug_print_ast_sexpr(arena, elem->index_expr);
+          debug_print_ast_expr(arena, elem->index_expr);
           printf(" ");
-          debug_print_ast_sexpr(arena, elem->value);
+          debug_print_ast_expr(arena, elem->value);
           printf(")");
         } else {
-          debug_print_ast_sexpr(arena, elem->value);
+          debug_print_ast_expr(arena, elem->value);
         }
         if (i < expr->expr_array_literal.list.element_count - 1) {
           printf(" ");
@@ -115,84 +115,84 @@ void debug_print_ast_sexpr(Arena *arena, AstExpr *expr) {
 
   case AST_EXPR_ADDR_OF:
     printf("(& ");
-    debug_print_ast_sexpr(arena, expr->expr_addr_of.operand);
+    debug_print_ast_expr(arena, expr->expr_addr_of.operand);
     printf(")");
     return;
 
   case AST_EXPR_DEREF:
     printf("(.* ");
-    debug_print_ast_sexpr(arena, expr->expr_deref.operand);
+    debug_print_ast_expr(arena, expr->expr_deref.operand);
     printf(")");
     return;
 
   case AST_EXPR_SUBSCRIPT:
     printf("([] ");
-    debug_print_ast_sexpr(arena, expr->expr_subscript.target);
+    debug_print_ast_expr(arena, expr->expr_subscript.target);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_subscript.index);
+    debug_print_ast_expr(arena, expr->expr_subscript.index);
     printf(")");
     return;
 
   case AST_EXPR_SLICE:
     printf("([: ");
-    debug_print_ast_sexpr(arena, expr->expr_slice.target);
+    debug_print_ast_expr(arena, expr->expr_slice.target);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_slice.start);
+    debug_print_ast_expr(arena, expr->expr_slice.start);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_slice.end);
+    debug_print_ast_expr(arena, expr->expr_slice.end);
     printf(")");
     return;
 
   case AST_EXPR_MEMBER:
     printf("(. ");
-    debug_print_ast_sexpr(arena, expr->expr_member.object);
+    debug_print_ast_expr(arena, expr->expr_member.object);
     printf(" %s", expr->expr_member.member);
     printf(")");
     return;
 
   case AST_EXPR_CALL:
     printf("(call ");
-    debug_print_ast_sexpr(arena, expr->expr_call.callee);
-    for (uint32_t i = 0; i < expr->expr_call.argument_count; i++) {
+    debug_print_ast_expr(arena, expr->expr_call.callee);
+    for (uint32_t i = 0; i < expr->expr_call.arg_count; i++) {
       printf(" ");
-      debug_print_ast_sexpr(arena, expr->expr_call.arguments[i]);
+      debug_print_ast_expr(arena, expr->expr_call.args[i]);
     }
     printf(")");
     return;
 
   case AST_EXPR_UNARY:
     printf("(%s ", unop_strings[expr->expr_unary.op]);
-    debug_print_ast_sexpr(arena, expr->expr_unary.operand);
+    debug_print_ast_expr(arena, expr->expr_unary.operand);
     printf(")");
     return;
 
   case AST_EXPR_BINARY:
     printf("(%s ", binop_strings[expr->expr_binary.op]);
-    debug_print_ast_sexpr(arena, expr->expr_binary.left);
+    debug_print_ast_expr(arena, expr->expr_binary.left);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_binary.right);
+    debug_print_ast_expr(arena, expr->expr_binary.right);
     printf(")");
     return;
 
   case AST_EXPR_LOGICAL:
     printf("(%s ", logicop_strings[expr->expr_logical.op]);
-    debug_print_ast_sexpr(arena, expr->expr_logical.left);
+    debug_print_ast_expr(arena, expr->expr_logical.left);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_logical.right);
+    debug_print_ast_expr(arena, expr->expr_logical.right);
     printf(")");
     return;
 
   case AST_EXPR_CAST:
     printf("(cast ");
-    debug_print_ast_sexpr(arena, expr->expr_cast.operand);
+    debug_print_ast_expr(arena, expr->expr_cast.operand);
     printf(")");
     return;
 
   case AST_EXPR_ASSIGN:
     printf("(= ");
-    debug_print_ast_sexpr(arena, expr->expr_assign.target);
+    debug_print_ast_expr(arena, expr->expr_assign.target);
     printf(" ");
-    debug_print_ast_sexpr(arena, expr->expr_assign.value);
+    debug_print_ast_expr(arena, expr->expr_assign.value);
     printf(")");
     return;
 
@@ -213,18 +213,18 @@ void debug_print_ast_stmt(Arena *arena, AstStmt *stmt) {
   switch (stmt->kind) {
   case AST_STMT_BLOCK:
     printf("Block Statement:\n");
-    for (uint32_t i = 0; i < stmt->stmt_block.statement_count; i++) {
+    for (uint32_t i = 0; i < stmt->stmt_block.stmt_count; i++) {
       print_indent(1);
       printf("Statement %u:\n", i);
       print_indent(2);
-      debug_print_ast_stmt(arena, stmt->stmt_block.statements[i]);
+      debug_print_ast_stmt(arena, stmt->stmt_block.stmts[i]);
     }
     return;
 
   case AST_STMT_EXPRESSION:
     printf("Expression Statement:\n");
     print_indent(1);
-    debug_print_ast_sexpr(arena, stmt->stmt_expression.expression);
+    debug_print_ast_expr(arena, stmt->stmt_expression.expression);
     printf("\n");
     return;
 
@@ -233,7 +233,7 @@ void debug_print_ast_stmt(Arena *arena, AstStmt *stmt) {
     if (stmt->stmt_local_var.init) {
       print_indent(1);
       printf("Init: ");
-      debug_print_ast_sexpr(arena, stmt->stmt_local_var.init);
+      debug_print_ast_expr(arena, stmt->stmt_local_var.init);
       printf("\n");
     }
     return;
@@ -243,7 +243,7 @@ void debug_print_ast_stmt(Arena *arena, AstStmt *stmt) {
     if (stmt->stmt_return.value) {
       print_indent(1);
       printf("Value: ");
-      debug_print_ast_sexpr(arena, stmt->stmt_return.value);
+      debug_print_ast_expr(arena, stmt->stmt_return.value);
       printf("\n");
     }
     return;
@@ -258,7 +258,7 @@ void debug_print_ast_stmt(Arena *arena, AstStmt *stmt) {
     printf("If Statement:\n");
     print_indent(1);
     printf("Condition: ");
-    debug_print_ast_sexpr(arena, stmt->stmt_if.condition);
+    debug_print_ast_expr(arena, stmt->stmt_if.condition);
     printf("\n");
     print_indent(1);
     printf("Then Branch:\n");
@@ -274,7 +274,7 @@ void debug_print_ast_stmt(Arena *arena, AstStmt *stmt) {
     printf("While Statement:\n");
     print_indent(1);
     printf("Condition: ");
-    debug_print_ast_sexpr(arena, stmt->stmt_while.condition);
+    debug_print_ast_expr(arena, stmt->stmt_while.condition);
     printf("\n");
     print_indent(1);
     printf("Body:\n");
@@ -356,8 +356,8 @@ static const char *reg_type_name(const IrFunction *func, IrReg reg) {
 }
 
 void debug_print_ir_function(IrFunction *func) {
-  for (size_t i = 0; i < da_len(func->buffer); i++) {
-    IrInstr *instr = &func->buffer[i];
+  for (size_t i = 0; i < da_len(func->instrs); i++) {
+    IrInstr *instr = &func->instrs[i];
 
     switch (instr->op) {
     case IR_OP_NONE:
@@ -557,7 +557,7 @@ void debug_print_ir_function(IrFunction *func) {
       printf(")\n");
       continue;
     case IR_OP_RETURN:
-      if (instr->arg1.id == NULL_REG.id) {
+      if (instr->arg1.id == IR_NULL_REG.id) {
         printf("%zu: RETURN\n", i);
       } else {
         printf("%zu: RETURN r%u\n", i, instr->arg1.id);

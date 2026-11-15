@@ -35,7 +35,7 @@ static char qbe_type_char(IrType type) {
 
 // The QBE type letter of a register.
 static inline char reg_type_char(const IrFunction *func, IrReg reg) {
-  assert(reg.id != NULL_REG.id && reg.id < da_len(func->reg_types) && "register without a recorded type");
+  assert(reg.id != IR_NULL_REG.id && reg.id < da_len(func->reg_types) && "register without a recorded type");
   return qbe_type_char(func->reg_types[reg.id]);
 }
 
@@ -331,13 +331,13 @@ static void qbe_write_op(FILE *file, const IrModule *module, const IrFunction *f
 
   // Calls and returns
   case IR_OP_CALL: {
-    IrType ret_type = func->reg_types[instr.res.id];
+    IrType return_type = func->reg_types[instr.res.id];
 
-    if (ir_type_is_void(ret_type)) {
+    if (ir_type_is_void(return_type)) {
       fprintf(file, "  call $%s(", instr.call.callee);
     } else {
       fprintf(file, "  %%r%u =", instr.res.id);
-      qbe_write_abi_type(file, module, ret_type);
+      qbe_write_abi_type(file, module, return_type);
       fprintf(file, " call $%s(", instr.call.callee);
     }
 
@@ -345,9 +345,9 @@ static void qbe_write_op(FILE *file, const IrModule *module, const IrFunction *f
       if (i > 0) fprintf(file, ", ");
       if (instr.call.is_variadic && i == instr.call.fixed_count) fprintf(file, "..., ");
 
-      IrReg arg_reg = instr.call.args[i];
-      qbe_write_abi_type(file, module, func->reg_types[arg_reg.id]);
-      fprintf(file, " %%r%u", arg_reg.id);
+      IrReg arg = instr.call.args[i];
+      qbe_write_abi_type(file, module, func->reg_types[arg.id]);
+      fprintf(file, " %%r%u", arg.id);
     }
 
     if (instr.call.is_variadic && instr.call.arg_count == instr.call.fixed_count) fprintf(file, ", ...");
@@ -357,7 +357,7 @@ static void qbe_write_op(FILE *file, const IrModule *module, const IrFunction *f
   }
 
   case IR_OP_RETURN:
-    if (instr.arg1.id == NULL_REG.id) {
+    if (instr.arg1.id == IR_NULL_REG.id) {
       fprintf(file, "  ret\n");
     } else {
       fprintf(file, "  ret %%r%u\n", instr.arg1.id);
@@ -387,14 +387,14 @@ static void qbe_write_instr(FILE *file, const IrModule *module, const IrFunction
     return;
   }
 
-  IrType res_type = func->reg_types[instr.res.id];
-  if (res_type.kind != IR_TYPE_INT || res_type.size >= 4) return;
+  IrType result_type = func->reg_types[instr.res.id];
+  if (result_type.kind != IR_TYPE_INT || result_type.size >= 4) return;
 
   fprintf(file,
           "  %%r%u =w ext%c%c %%r%u\n",
           instr.res.id,
-          res_type.is_signed ? 's' : 'u',
-          res_type.size == 1 ? 'b' : 'h',
+          result_type.is_signed ? 's' : 'u',
+          result_type.size == 1 ? 'b' : 'h',
           instr.res.id);
 }
 
@@ -452,17 +452,17 @@ static void qbe_write_function(FILE *file, const IrModule *module, const IrFunct
   fprintf(file, "$%s(", func->name);
 
   for (uint32_t i = 0; i < func->param_count; i++) {
-    IrReg param_reg = func->params[i];
+    IrReg param = func->params[i];
 
     if (i > 0) fprintf(file, ", ");
-    qbe_write_abi_type(file, module, func->reg_types[param_reg.id]);
-    fprintf(file, " %%r%u", param_reg.id);
+    qbe_write_abi_type(file, module, func->reg_types[param.id]);
+    fprintf(file, " %%r%u", param.id);
   }
 
   fprintf(file, ") {\n@start\n");
 
-  for (size_t i = 0; i < da_len(func->buffer); i++) {
-    qbe_write_instr(file, module, func, func->buffer[i]);
+  for (size_t i = 0; i < da_len(func->instrs); i++) {
+    qbe_write_instr(file, module, func, func->instrs[i]);
   }
 
   fprintf(file, "}\n");
@@ -470,7 +470,7 @@ static void qbe_write_function(FILE *file, const IrModule *module, const IrFunct
 
 // QBE generation public functions
 
-bool generate_qbe(const char *filename, const IrModule *module) {
+bool gen_qbe(const char *filename, const IrModule *module) {
   FILE *file = fopen(filename, "w");
   if (!file) {
     fprintf(stderr, "Failed to open file '%s' for writing.\n", filename);

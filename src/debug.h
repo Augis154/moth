@@ -7,7 +7,7 @@
 
 void debug_print_token(Token token);
 
-void debug_print_ast_sexpr(Arena *arena, AstExpr *root);
+void debug_print_ast_expr(Arena *arena, AstExpr *root);
 void debug_print_ast_stmt(Arena *arena, AstStmt *stmt);
 void debug_print_ast_decl(Arena *arena, AstDecl *decl);
 

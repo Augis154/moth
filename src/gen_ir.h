@@ -19,9 +19,8 @@ typedef struct {
   SemaContext *sema_ctx;
 
   IrModule *module;
-  uint32_t current_func_idx;
+  uint32_t current_function_index;
 
-  uint32_t next_reg;
   uint32_t next_label;
 
   IrReg *symbol_to_reg;
@@ -31,8 +30,8 @@ typedef struct {
   bool block_terminated;
 } IrGenContext;
 
-void gen_ir_init(IrGenContext *context, CompilationUnit *comp_unit, SemaContext *sema_ctx);
-void gen_ir_free(IrGenContext *context);
+void gen_ir_init(IrGenContext *ctx, CompilationUnit *comp_unit, SemaContext *sema_ctx);
+void gen_ir_free(IrGenContext *ctx);
 
 void gen_ir(IrGenContext *ctx, AstProgram *program);
 

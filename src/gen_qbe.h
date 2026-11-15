@@ -3,6 +3,6 @@
 
 #include "ir.h"
 
-bool generate_qbe(const char *filename, const IrModule *module);
+bool gen_qbe(const char *filename, const IrModule *module);
 
 #endif // GEN_QBE_H

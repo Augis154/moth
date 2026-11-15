@@ -484,7 +484,7 @@ static LogicalOp get_logical_op(TokenKind kind) {
 }
 
 // INT  -- decimal, 0xHEX or 0bBINARY digits, with optional '_' separators.
-static AstExpr *parse_int_literal(Parser *parser) {
+static AstExpr *parse_expr_literal_int(Parser *parser) {
   uint8_t base = 10;
 
   Token token = parser->previous;
@@ -526,7 +526,7 @@ static AstExpr *parse_int_literal(Parser *parser) {
 }
 
 // FLOAT  -- digits '.' digits, with an optional 'f' suffix.
-static AstExpr *parse_float_literal(Parser *parser) {
+static AstExpr *parse_expr_literal_float(Parser *parser) {
   AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LITERAL, parser->previous.loc);
   expr->expr_literal.kind = AST_LITERAL_FLOAT;
   expr->expr_literal.float_value = strtod(parser->previous.lexeme, NULL);
@@ -535,7 +535,7 @@ static AstExpr *parse_float_literal(Parser *parser) {
 }
 
 // CHAR  -- a single UTF-8 character or escape sequence between single quotes; the value is its code point.
-static AstExpr *parse_char_literal(Parser *parser) {
+static AstExpr *parse_expr_literal_char(Parser *parser) {
   const char *cursor = parser->previous.lexeme + 1;
   const char *end = parser->previous.lexeme + parser->previous.lexeme_len - 1;
 
@@ -570,7 +570,7 @@ static AstExpr *parse_char_literal(Parser *parser) {
 }
 
 // STRING  -- text between double quotes, with escape sequences; the value is its bytes.
-static AstExpr *parse_string_literal(Parser *parser) {
+static AstExpr *parse_expr_literal_string(Parser *parser) {
   size_t str_len = parser->previous.lexeme_len;
 
   ArenaMark mark = arena_mark(&parser->comp_unit->arena);
@@ -600,7 +600,7 @@ static AstExpr *parse_string_literal(Parser *parser) {
 }
 
 // 'true' | 'false' | 'null' | 'undef'
-static AstExpr *parse_keyword_literal(Parser *parser) {
+static AstExpr *parse_expr_literal_keyword(Parser *parser) {
   AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LITERAL, parser->previous.loc);
 
   switch (parser->previous.kind) {
@@ -617,14 +617,14 @@ static AstExpr *parse_keyword_literal(Parser *parser) {
     expr->expr_literal.kind = AST_LITERAL_UNDEF;
     break;
   default:
-    UNREACHABLE("parse_keyword_literal: not a keyword literal");
+    UNREACHABLE("parse_expr_literal_keyword: not a keyword literal");
   }
 
   return expr;
 }
 
 // IDENT
-static AstExpr *parse_identifier(Parser *parser) {
+static AstExpr *parse_expr_identifier(Parser *parser) {
   const char *identifier_name = parse_identifier_name(parser, parser->previous);
   if (!identifier_name) return NULL;
 
@@ -635,31 +635,32 @@ static AstExpr *parse_identifier(Parser *parser) {
 }
 
 // '[' elements ']' | '[' expression ';' expression ']', where an element is [ expression ':' ] expression
-static AstExpr *parse_array_literal(Parser *parser) {
+static AstExpr *parse_expr_array_literal(Parser *parser) {
   SourceLoc start_loc = parser->previous.loc;
 
-  AstExpr *array_literal_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ARRAY_LITERAL, start_loc);
-  array_literal_expr->expr_array_literal.is_repeat = false;
-  array_literal_expr->expr_array_literal.list.elements = NULL;
-  array_literal_expr->expr_array_literal.list.element_count = 0;
-  array_literal_expr->expr_array_literal.list.is_sparse = false;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ARRAY_LITERAL, start_loc);
+  AstExprArrayLiteral *array_literal_expr = &expr->expr_array_literal;
+  array_literal_expr->is_repeat = false;
+  array_literal_expr->list.elements = NULL;
+  array_literal_expr->list.element_count = 0;
+  array_literal_expr->list.is_sparse = false;
 
   if (match(parser, TOKEN_RBRACKET)) {
-    return array_literal_expr;
+    return expr;
   }
 
-  AstExpr *first = parse_expression(parser);
+  AstExpr *first = parse_expr(parser);
   if (!first) return NULL;
 
   // 1. Repeat syntax: [val; count]
   if (match(parser, TOKEN_SEMICOLON)) {
-    array_literal_expr->expr_array_literal.is_repeat = true;
-    array_literal_expr->expr_array_literal.repeat.value = first;
-    array_literal_expr->expr_array_literal.repeat.length_expr = parse_expression(parser);
-    if (!array_literal_expr->expr_array_literal.repeat.length_expr) return NULL;
+    array_literal_expr->is_repeat = true;
+    array_literal_expr->repeat.value = first;
+    array_literal_expr->repeat.length_expr = parse_expr(parser);
+    if (!array_literal_expr->repeat.length_expr) return NULL;
 
     consume(parser, TOKEN_RBRACKET, "Expected ']' after array repeat length.");
-    return array_literal_expr;
+    return expr;
   }
 
   AstArrayElement *elements = NULL;
@@ -667,27 +668,27 @@ static AstExpr *parse_array_literal(Parser *parser) {
   // 2. Parse elements (sequential or sparse):
   while (true) {
     AstExpr *index_expr = NULL;
-    AstExpr *val_expr = NULL;
+    AstExpr *value_expr = NULL;
 
     if (match(parser, TOKEN_COLON)) {
-      array_literal_expr->expr_array_literal.list.is_sparse = true;
+      array_literal_expr->list.is_sparse = true;
       index_expr = first;
-      val_expr = parse_expression(parser);
-      if (!val_expr) return NULL;
+      value_expr = parse_expr(parser);
+      if (!value_expr) return NULL;
     } else {
-      val_expr = first;
+      value_expr = first;
     }
 
     AstArrayElement element = {
       .index_expr = index_expr,
-      .value = val_expr,
-      .loc = val_expr->loc,
+      .value = value_expr,
+      .loc = value_expr->loc,
     };
     da_append(elements, element);
 
     if (!match(parser, TOKEN_COMMA) || check(parser, TOKEN_RBRACKET)) break;
 
-    first = parse_expression(parser);
+    first = parse_expr(parser);
     if (!first) return NULL;
   }
 
@@ -696,16 +697,16 @@ static AstExpr *parse_array_literal(Parser *parser) {
   AstArrayElement *element_array =
     arena_copy_array(&parser->comp_unit->arena, elements, da_len(elements), sizeof(AstArrayElement));
 
-  array_literal_expr->expr_array_literal.list.elements = element_array;
-  array_literal_expr->expr_array_literal.list.element_count = da_len(elements);
+  array_literal_expr->list.elements = element_array;
+  array_literal_expr->list.element_count = da_len(elements);
   da_free(elements);
 
-  return array_literal_expr;
+  return expr;
 }
 
 // '(' expression ')'  -- the '(' is already consumed.
 static AstExpr *parse_grouping(Parser *parser) {
-  AstExpr *expr = parse_expression(parser);
+  AstExpr *expr = parse_expr(parser);
 
   consume(parser, TOKEN_RPAREN, "Expected ')' after expression.");
 
@@ -713,68 +714,68 @@ static AstExpr *parse_grouping(Parser *parser) {
 }
 
 // '&' expression
-static AstExpr *parse_addr_of(Parser *parser) {
+static AstExpr *parse_expr_addr_of(Parser *parser) {
   SourceLoc start_loc = parser->previous.loc;
 
   AstExpr *operand = parse_precedence(parser, PREC_PREFIX);
   if (!operand) return NULL;
 
-  AstExpr *addr_of_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ADDR_OF, start_loc);
-  addr_of_expr->expr_addr_of.operand = operand;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ADDR_OF, start_loc);
+  expr->expr_addr_of.operand = operand;
 
-  return addr_of_expr;
+  return expr;
 }
 
 // expression '.*'  -- the '.*' is already consumed.
-static AstExpr *parse_deref(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_deref(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
-  AstExpr *deref_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_DEREF, parser->previous.loc);
-  deref_expr->expr_deref.operand = left;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_DEREF, parser->previous.loc);
+  expr->expr_deref.operand = left;
 
-  return deref_expr;
+  return expr;
 }
 
 // expression '[' ( expression | [ expression ] ':' [ expression ] ) ']'  -- the '[' is already consumed.
 // A subscript `xs[i]`, or a slice `xs[start:end]` where either bound may be left out.
-static AstExpr *parse_subscript(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_subscript(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
   AstExpr *index = NULL;
   if (!check(parser, TOKEN_COLON)) {
-    index = parse_expression(parser);
+    index = parse_expr(parser);
   }
 
   if (match(parser, TOKEN_COLON)) {
     AstExpr *end_index = NULL;
 
     if (!check(parser, TOKEN_RBRACKET)) {
-      end_index = parse_expression(parser);
+      end_index = parse_expr(parser);
     }
 
     consume(parser, TOKEN_RBRACKET, "Expected ']' after slice index.");
 
-    AstExpr *slice_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_SLICE, left->loc);
-    slice_expr->expr_slice.target = left;
-    slice_expr->expr_slice.start = index;
-    slice_expr->expr_slice.end = end_index;
+    AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_SLICE, left->loc);
+    expr->expr_slice.target = left;
+    expr->expr_slice.start = index;
+    expr->expr_slice.end = end_index;
 
-    return slice_expr;
+    return expr;
   }
 
   if (!index) return NULL;
 
   consume(parser, TOKEN_RBRACKET, "Expected ']' after subscript index.");
 
-  AstExpr *subscript_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_SUBSCRIPT, left->loc);
-  subscript_expr->expr_subscript.target = left;
-  subscript_expr->expr_subscript.index = index;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_SUBSCRIPT, left->loc);
+  expr->expr_subscript.target = left;
+  expr->expr_subscript.index = index;
 
-  return subscript_expr;
+  return expr;
 }
 
 // expression '.' IDENT  -- the '.' is already consumed.
-static AstExpr *parse_member(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_member(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
   consume(parser, TOKEN_IDENT, "Expected member name after '.'.");
@@ -782,20 +783,20 @@ static AstExpr *parse_member(Parser *parser, AstExpr *left) {
   const char *member = parse_identifier_name(parser, parser->previous);
   if (!member) return NULL;
 
-  AstExpr *member_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_MEMBER, left->loc);
-  member_expr->expr_member.object = left;
-  member_expr->expr_member.member = member;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_MEMBER, left->loc);
+  expr->expr_member.object = left;
+  expr->expr_member.member = member;
 
-  return member_expr;
+  return expr;
 }
 
 // callee '(' [ expression { ',' expression } [ ',' ] ] ')'  -- the '(' is already consumed.
-static AstExpr *parse_call(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_call(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
   AstExpr **args = NULL;
   while (!check(parser, TOKEN_RPAREN) && !check(parser, TOKEN_EOF)) {
-    AstExpr *arg = parse_expression(parser);
+    AstExpr *arg = parse_expr(parser);
     if (arg) {
       da_append(args, arg);
     }
@@ -807,36 +808,36 @@ static AstExpr *parse_call(Parser *parser, AstExpr *left) {
 
   consume(parser, TOKEN_RPAREN, "Expected ')' after function arguments.");
 
-  AstExpr *call_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CALL, left->loc);
-  call_expr->expr_call.callee = left;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CALL, left->loc);
+  expr->expr_call.callee = left;
 
   AstExpr **arg_array = arena_copy_array(&parser->comp_unit->arena, args, da_len(args), sizeof(AstExpr *));
 
-  call_expr->expr_call.arguments = arg_array;
-  call_expr->expr_call.argument_count = da_len(args);
+  expr->expr_call.args = arg_array;
+  expr->expr_call.arg_count = da_len(args);
 
   da_free(args);
 
-  return call_expr;
+  return expr;
 }
 
 // ( '-' | '!' | '~' ) expression
-static AstExpr *parse_unary(Parser *parser) {
+static AstExpr *parse_expr_unary(Parser *parser) {
   SourceLoc start_loc = parser->previous.loc;
   TokenKind operator = parser->previous.kind;
 
-  AstExpr *op_expr = parse_precedence(parser, PREC_PREFIX);
-  if (!op_expr) return NULL;
+  AstExpr *operand = parse_precedence(parser, PREC_PREFIX);
+  if (!operand) return NULL;
 
-  AstExpr *unary_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_UNARY, start_loc);
-  unary_expr->expr_unary.op = get_unary_op(operator);
-  unary_expr->expr_unary.operand = op_expr;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_UNARY, start_loc);
+  expr->expr_unary.op = get_unary_op(operator);
+  expr->expr_unary.operand = operand;
 
-  return unary_expr;
+  return expr;
 }
 
 // left OP right, where OP is an arithmetic, comparison, bitwise or shift operator; left-associative.
-static AstExpr *parse_binary(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_binary(Parser *parser, AstExpr *left) {
   SourceLoc start_loc = parser->previous.loc;
   TokenKind operator = parser->previous.kind;
 
@@ -844,16 +845,16 @@ static AstExpr *parse_binary(Parser *parser, AstExpr *left) {
   AstExpr *right = parse_precedence(parser, rule->precedence + 1);
   if (!left || !right) return NULL;
 
-  AstExpr *binary_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_BINARY, start_loc);
-  binary_expr->expr_binary.op = get_binary_op(operator);
-  binary_expr->expr_binary.left = left;
-  binary_expr->expr_binary.right = right;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_BINARY, start_loc);
+  expr->expr_binary.op = get_binary_op(operator);
+  expr->expr_binary.left = left;
+  expr->expr_binary.right = right;
 
-  return binary_expr;
+  return expr;
 }
 
 // left ( '&&' | '||' ) right  -- left-associative.
-static AstExpr *parse_logical(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_logical(Parser *parser, AstExpr *left) {
   SourceLoc start_loc = parser->previous.loc;
   TokenKind operator = parser->previous.kind;
 
@@ -861,34 +862,34 @@ static AstExpr *parse_logical(Parser *parser, AstExpr *left) {
   AstExpr *right = parse_precedence(parser, rule->precedence + 1);
   if (!left || !right) return NULL;
 
-  AstExpr *logical_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LOGICAL, start_loc);
-  logical_expr->expr_logical.op = get_logical_op(operator);
-  logical_expr->expr_logical.left = left;
-  logical_expr->expr_logical.right = right;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LOGICAL, start_loc);
+  expr->expr_logical.op = get_logical_op(operator);
+  expr->expr_logical.left = left;
+  expr->expr_logical.right = right;
 
-  return logical_expr;
+  return expr;
 }
 
 // expression 'as' type  -- the 'as' is already consumed.
-static AstExpr *parse_cast(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_cast(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
   SourceLoc start_loc = parser->previous.loc;
 
-  AstType *type = parse_type(parser);
-  if (!type) {
+  AstType *ast_type = parse_type(parser);
+  if (!ast_type) {
     error_at(parser, parser->current, "Expected type after 'as'.");
     return NULL;
   }
 
-  AstExpr *cast_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CAST, start_loc);
-  cast_expr->expr_cast.operand = left;
-  cast_expr->expr_cast.target = type;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CAST, start_loc);
+  expr->expr_cast.operand = left;
+  expr->expr_cast.target_type = ast_type;
 
-  return cast_expr;
+  return expr;
 }
 
 // target '=' expression  -- right-associative; sema checks that the target can be assigned to.
-static AstExpr *parse_assignment(Parser *parser, AstExpr *left) {
+static AstExpr *parse_expr_assign(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
   SourceLoc start_loc = left->loc;
@@ -896,17 +897,24 @@ static AstExpr *parse_assignment(Parser *parser, AstExpr *left) {
   AstExpr *right = parse_precedence(parser, PREC_ASSIGNMENT);
   if (!right) return NULL;
 
-  AstExpr *assign_expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ASSIGN, start_loc);
-  assign_expr->expr_assign.target = left;
-  assign_expr->expr_assign.value = right;
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ASSIGN, start_loc);
+  expr->expr_assign.target = left;
+  expr->expr_assign.value = right;
 
-  return assign_expr;
+  return expr;
+}
+
+// expression := assignment  -- the lowest precedence level.
+AstExpr *parse_expr(Parser *parser) {
+  return parse_precedence(parser, PREC_ASSIGNMENT);
 }
 
 // Statement parsing functions
 
+static AstDecl *parse_decl_function(Parser *parser, bool is_extern);
+
 // '{' { statement } '}'
-static AstStmt *parse_block(Parser *parser) {
+static AstStmt *parse_stmt_block(Parser *parser) {
   SourceLoc block_start = parser->current.loc;
 
   consume(parser, TOKEN_LBRACE, "Expected '{' to start block.");
@@ -914,9 +922,9 @@ static AstStmt *parse_block(Parser *parser) {
   AstStmt **stmts = NULL;
 
   while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
-    AstStmt *stmt = parse_statement(parser);
-    if (stmt) {
-      da_append(stmts, stmt);
+    AstStmt *inner_stmt = parse_stmt(parser);
+    if (inner_stmt) {
+      da_append(stmts, inner_stmt);
     }
 
     if (parser->panic_mode) {
@@ -926,22 +934,22 @@ static AstStmt *parse_block(Parser *parser) {
 
   consume(parser, TOKEN_RBRACE, "Expected '}' to end block.");
 
-  AstStmt *block_stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_BLOCK, block_start);
+  AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_BLOCK, block_start);
 
   AstStmt **stmt_array = arena_copy_array(&parser->comp_unit->arena, stmts, da_len(stmts), sizeof(AstStmt *));
 
-  block_stmt->stmt_block.statements = stmt_array;
-  block_stmt->stmt_block.statement_count = da_len(stmts);
+  stmt->stmt_block.stmts = stmt_array;
+  stmt->stmt_block.stmt_count = da_len(stmts);
   da_free(stmts);
 
-  return block_stmt;
+  return stmt;
 }
 
 // expression ';'
-static AstStmt *parse_expression_statement(Parser *parser) {
+static AstStmt *parse_stmt_expression(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  AstExpr *expr = parse_expression(parser);
+  AstExpr *expr = parse_expr(parser);
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after expression.");
 
@@ -952,16 +960,16 @@ static AstStmt *parse_expression_statement(Parser *parser) {
 }
 
 // 'var' IDENT [ ':' type ] [ '=' expression ] ';'  -- needs a type or an initializer.
-static AstStmt *parse_variable_declaration(Parser *parser) {
+static AstStmt *parse_stmt_local_var(Parser *parser) {
   consume(parser, TOKEN_VAR, "Expected 'var' keyword for variable declaration.");
   consume(parser, TOKEN_IDENT, "Expected variable name after 'var'.");
 
   Token name_token = parser->previous;
 
-  AstType *type_spec = NULL;
+  AstType *ast_type = NULL;
   if (match(parser, TOKEN_COLON)) {
-    type_spec = parse_type(parser);
-    if (!type_spec) {
+    ast_type = parse_type(parser);
+    if (!ast_type) {
       error_at(parser,
                parser->previous,
                "Expected type after ':' in declaration of variable '%.*s'.",
@@ -970,14 +978,14 @@ static AstStmt *parse_variable_declaration(Parser *parser) {
     }
   }
 
-  AstExpr *init_expr = NULL;
+  AstExpr *init = NULL;
   if (match(parser, TOKEN_ASSIGN)) {
-    init_expr = parse_expression(parser);
+    init = parse_expr(parser);
   }
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after variable declaration.");
 
-  if (!type_spec && !init_expr) {
+  if (!ast_type && !init) {
     error_at(parser,
              name_token,
              "Variable '%.*s' must have either a type annotation or an initializer.",
@@ -991,21 +999,21 @@ static AstStmt *parse_variable_declaration(Parser *parser) {
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_LOCAL_VAR, name_token.loc);
   stmt->stmt_local_var.name = var_name;
-  stmt->stmt_local_var.type = type_spec;
-  stmt->stmt_local_var.init = init_expr;
+  stmt->stmt_local_var.type = ast_type;
+  stmt->stmt_local_var.init = init;
 
   return stmt;
 }
 
 // 'return' [ expression ] ';'
-static AstStmt *parse_return_statement(Parser *parser) {
+static AstStmt *parse_stmt_return(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_RETURN, "Expected 'return' keyword for return statement.");
 
   AstExpr *return_expr = NULL;
   if (!check(parser, TOKEN_SEMICOLON)) {
-    return_expr = parse_expression(parser);
+    return_expr = parse_expr(parser);
   }
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after return statement.");
@@ -1017,7 +1025,7 @@ static AstStmt *parse_return_statement(Parser *parser) {
 }
 
 // 'break' ';'
-static AstStmt *parse_break_statement(Parser *parser) {
+static AstStmt *parse_stmt_break(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_BREAK, "Expected 'break' keyword for break statement.");
@@ -1028,7 +1036,7 @@ static AstStmt *parse_break_statement(Parser *parser) {
 }
 
 // 'continue' ';'
-static AstStmt *parse_continue_statement(Parser *parser) {
+static AstStmt *parse_stmt_continue(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_CONTINUE, "Expected 'continue' keyword for continue statement.");
@@ -1039,22 +1047,22 @@ static AstStmt *parse_continue_statement(Parser *parser) {
 }
 
 // 'if' expression block [ 'else' statement ]  -- the else branch is usually a block or another if.
-static AstStmt *parse_if_statement(Parser *parser) {
+static AstStmt *parse_stmt_if(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_IF, "Expected 'if' keyword for if statement.");
 
-  AstExpr *condition = parse_expression(parser);
+  AstExpr *condition = parse_expr(parser);
 
   if (!check(parser, TOKEN_LBRACE)) {
     error_at(parser, parser->previous, "Expected '{' after 'if' condition.");
   }
 
-  AstStmt *then_branch = parse_block(parser);
+  AstStmt *then_branch = parse_stmt_block(parser);
 
   AstStmt *else_branch = NULL;
   if (match(parser, TOKEN_ELSE)) {
-    else_branch = parse_statement(parser);
+    else_branch = parse_stmt(parser);
   }
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_IF, start_loc);
@@ -1066,18 +1074,18 @@ static AstStmt *parse_if_statement(Parser *parser) {
 }
 
 // 'while' expression block
-static AstStmt *parse_while_statement(Parser *parser) {
+static AstStmt *parse_stmt_while(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_WHILE, "Expected 'while' keyword for while statement.");
 
-  AstExpr *condition = parse_expression(parser);
+  AstExpr *condition = parse_expr(parser);
 
   if (!check(parser, TOKEN_LBRACE)) {
     error_at(parser, parser->previous, "Expected '{' after 'while' condition.");
   }
 
-  AstStmt *body = parse_block(parser);
+  AstStmt *body = parse_stmt_block(parser);
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_WHILE, start_loc);
   stmt->stmt_while.condition = condition;
@@ -1086,11 +1094,40 @@ static AstStmt *parse_while_statement(Parser *parser) {
   return stmt;
 }
 
+// statement := block | variable_declaration | return | break | continue | if | while | expression_statement
+AstStmt *parse_stmt(Parser *parser) {
+  switch (parser->current.kind) {
+  case TOKEN_LBRACE:
+    return parse_stmt_block(parser);
+  case TOKEN_VAR:
+    return parse_stmt_local_var(parser);
+  case TOKEN_FN:
+    error_at(parser, parser->current, "Nested functions are not supported.");
+    parse_decl_function(parser, false);
+    return NULL;
+
+  case TOKEN_RETURN:
+    return parse_stmt_return(parser);
+  case TOKEN_BREAK:
+    return parse_stmt_break(parser);
+  case TOKEN_CONTINUE:
+    return parse_stmt_continue(parser);
+
+  case TOKEN_IF:
+    return parse_stmt_if(parser);
+  case TOKEN_WHILE:
+    return parse_stmt_while(parser);
+
+  default:
+    return parse_stmt_expression(parser);
+  }
+}
+
 // Declaration parsing functions
 
 // IDENT ':' type  -- the shape of a parameter and of a struct field; `what` names it in errors. Returns false after
 // reporting an error.
-static bool parse_typed_name(Parser *parser, const char *what, const char **name, AstType **type) {
+static bool parse_typed_name(Parser *parser, const char *what, const char **name, AstType **ast_type) {
   if (!match(parser, TOKEN_IDENT)) {
     error_at(parser, parser->previous, "Expected %s name.", what);
     return false;
@@ -1104,8 +1141,8 @@ static bool parse_typed_name(Parser *parser, const char *what, const char **name
     return false;
   }
 
-  *type = parse_type(parser);
-  if (!*type) {
+  *ast_type = parse_type(parser);
+  if (!*ast_type) {
     error_at(parser, parser->previous, "Expected type for %s '%s'.", what, *name);
     return false;
   }
@@ -1114,8 +1151,8 @@ static bool parse_typed_name(Parser *parser, const char *what, const char **name
 }
 
 // [ 'extern' ] 'fn' IDENT '(' [ param { ',' param } [ ',' '...' | ',' ] ] ')' [ ':' type ] ( block | ';' )
-// The ';' form and the '...' parameter are only for 'extern', whose keyword parse_extern_declaration has consumed.
-static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
+// The ';' form and the '...' parameter are only for 'extern', whose keyword parse_decl_extern has consumed.
+static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_FN, "Expected 'fn' keyword for function declaration.");
@@ -1146,15 +1183,15 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
     }
 
     const char *param_name;
-    AstType *param_type;
-    if (!parse_typed_name(parser, "parameter", &param_name, &param_type)) {
+    AstType *param_ast_type;
+    if (!parse_typed_name(parser, "parameter", &param_name, &param_ast_type)) {
       da_free(params);
       return NULL;
     }
 
     AstParam param = {
       .name = param_name,
-      .type = param_type,
+      .type = param_ast_type,
       .loc = param_loc,
     };
     da_append(params, param);
@@ -1170,10 +1207,10 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
   AstParam *param_array = arena_copy_array(&parser->comp_unit->arena, params, param_count, sizeof(AstParam));
   da_free(params);
 
-  AstType *return_type = NULL;
+  AstType *return_ast_type = NULL;
   if (match(parser, TOKEN_COLON)) {
-    return_type = parse_type(parser);
-    if (!return_type) {
+    return_ast_type = parse_type(parser);
+    if (!return_ast_type) {
       error_at(parser, parser->previous, "Expected return type after ':' in declaration of function '%s'.", func_name);
     }
   }
@@ -1186,14 +1223,14 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
     error_at(parser, parser->previous, "Function '%s' has no body; add one or declare it 'extern'.", func_name);
     return NULL;
   } else {
-    func_body = parse_block(parser);
+    func_body = parse_stmt_block(parser);
     if (!func_body) return NULL;
   }
 
   AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_FUNCTION, start_loc);
   decl->decl_function.name = func_name;
   decl->decl_function.body = func_body;
-  decl->decl_function.return_type = return_type;
+  decl->decl_function.return_type = return_ast_type;
 
   decl->decl_function.params = param_array;
   decl->decl_function.param_count = param_count;
@@ -1205,7 +1242,7 @@ static AstDecl *parse_function_declaration(Parser *parser, bool is_extern) {
 }
 
 // 'struct' IDENT '{' [ field { ',' field } [ ',' ] ] '}'  where field := IDENT ':' type
-static AstDecl *parse_struct_declaration(Parser *parser) {
+static AstDecl *parse_decl_struct(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_STRUCT, "Expected 'struct' keyword for struct declaration.");
@@ -1222,15 +1259,15 @@ static AstDecl *parse_struct_declaration(Parser *parser) {
     SourceLoc field_loc = parser->current.loc;
 
     const char *field_name;
-    AstType *field_type;
-    if (!parse_typed_name(parser, "field", &field_name, &field_type)) {
+    AstType *field_ast_type;
+    if (!parse_typed_name(parser, "field", &field_name, &field_ast_type)) {
       da_free(fields);
       return NULL;
     }
 
     AstStructField field = {
       .name = field_name,
-      .type = field_type,
+      .type = field_ast_type,
       .loc = field_loc,
     };
     da_append(fields, field);
@@ -1256,12 +1293,12 @@ static AstDecl *parse_struct_declaration(Parser *parser) {
 }
 
 // 'extern' function_declaration  -- a declaration without a body, defined outside this program.
-static AstDecl *parse_extern_declaration(Parser *parser) {
+static AstDecl *parse_decl_extern(Parser *parser) {
   consume(parser, TOKEN_EXTERN, "Expected 'extern' keyword for extern declaration.");
 
   switch (parser->current.kind) {
   case TOKEN_FN:
-    return parse_function_declaration(parser, true);
+    return parse_decl_function(parser, true);
 
   default:
     error_at(parser, parser->current, "Expected 'fn' after 'extern'.");
@@ -1270,10 +1307,30 @@ static AstDecl *parse_extern_declaration(Parser *parser) {
   return NULL;
 }
 
+// declaration := function_declaration | extern_declaration  -- recovers to the next 'fn' or 'extern' on anything else.
+AstDecl *parse_decl(Parser *parser) {
+  switch (parser->current.kind) {
+  case TOKEN_FN:
+    return parse_decl_function(parser, false);
+
+  case TOKEN_STRUCT:
+    return parse_decl_struct(parser);
+
+  case TOKEN_EXTERN:
+    return parse_decl_extern(parser);
+
+  default:
+    error_at(parser, parser->current, "Expected declaration.");
+    synchronize_top_level(parser);
+  }
+
+  return NULL;
+}
+
 // Type parsing functions
 
 // IDENT  -- a named type such as i32.
-static AstType *parse_named_type(Parser *parser) {
+static AstType *parse_type_named(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_IDENT, "Expected type name for named type.");
@@ -1281,59 +1338,78 @@ static AstType *parse_named_type(Parser *parser) {
   const char *type_name = parse_identifier_name(parser, parser->previous);
   if (!type_name) return NULL;
 
-  AstType *type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_NAMED, start_loc);
-  type->named = type_name;
+  AstType *ast_type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_NAMED, start_loc);
+  ast_type->type_named.name = type_name;
 
-  return type;
+  return ast_type;
 }
 
 // '*T' type
-static AstType *parse_pointer_type(Parser *parser) {
+static AstType *parse_type_pointer(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_STAR, "Expected '*' for pointer type.");
 
-  AstType *base_type = parse_type(parser);
-  if (!base_type) return NULL;
+  AstType *base_ast_type = parse_type(parser);
+  if (!base_ast_type) return NULL;
 
-  AstType *type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_POINTER, start_loc);
-  type->pointer.base_type = base_type;
+  AstType *ast_type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_POINTER, start_loc);
+  ast_type->type_pointer.base_type = base_ast_type;
 
-  return type;
+  return ast_type;
 }
 
 // '[' [ expression | '_' ] ']' type  -- an array, or a slice when the brackets are empty.
-static AstType *parse_array_type(Parser *parser) {
+static AstType *parse_type_array(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
   consume(parser, TOKEN_LBRACKET, "Expected '[' for array type.");
 
   if (match(parser, TOKEN_RBRACKET)) {
-    AstType *base_type = parse_type(parser);
-    if (!base_type) return NULL;
+    AstType *elem_ast_type = parse_type(parser);
+    if (!elem_ast_type) return NULL;
 
-    AstType *type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_SLICE, start_loc);
-    type->slice.elem_type = base_type;
+    AstType *ast_type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_SLICE, start_loc);
+    ast_type->type_slice.elem_type = elem_ast_type;
 
-    return type;
+    return ast_type;
   }
 
   AstExpr *length_expr = NULL;
   if (!match(parser, TOKEN_UNDERSCORE)) {
-    length_expr = parse_expression(parser);
+    length_expr = parse_expr(parser);
     if (!length_expr) return NULL;
   }
 
-  consume(parser, TOKEN_RBRACKET, "Expected ']' after array size.");
+  consume(parser, TOKEN_RBRACKET, "Expected ']' after array length.");
 
-  AstType *base_type = parse_type(parser);
-  if (!base_type) return NULL;
+  AstType *elem_ast_type = parse_type(parser);
+  if (!elem_ast_type) return NULL;
 
-  AstType *type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_ARRAY, start_loc);
-  type->array.elem_type = base_type;
-  type->array.length_expr = length_expr;
+  AstType *ast_type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_ARRAY, start_loc);
+  ast_type->type_array.elem_type = elem_ast_type;
+  ast_type->type_array.length_expr = length_expr;
 
-  return type;
+  return ast_type;
+}
+
+// type := IDENT | '*' type | '[' [ expression | '_' ] ']' type
+AstType *parse_type(Parser *parser) {
+  Token token = parser->current;
+
+  switch (token.kind) {
+  case TOKEN_IDENT:
+    return parse_type_named(parser);
+  case TOKEN_STAR:
+    return parse_type_pointer(parser);
+  case TOKEN_LBRACKET:
+    return parse_type_array(parser);
+
+  default:
+    return NULL;
+  }
+
+  return NULL;
 }
 
 // Parser public functions
@@ -1348,85 +1424,12 @@ void parser_init(Parser *parser, CompilationUnit *comp_unit) {
   advance(parser);
 }
 
-// expression := assignment  -- the lowest precedence level.
-AstExpr *parse_expression(Parser *parser) {
-  return parse_precedence(parser, PREC_ASSIGNMENT);
-}
-
-// statement := block | variable_declaration | return | break | continue | if | while | expression_statement
-AstStmt *parse_statement(Parser *parser) {
-  switch (parser->current.kind) {
-  case TOKEN_LBRACE:
-    return parse_block(parser);
-  case TOKEN_VAR:
-    return parse_variable_declaration(parser);
-  case TOKEN_FN:
-    error_at(parser, parser->current, "Nested functions are not supported.");
-    parse_function_declaration(parser, false);
-    return NULL;
-
-  case TOKEN_RETURN:
-    return parse_return_statement(parser);
-  case TOKEN_BREAK:
-    return parse_break_statement(parser);
-  case TOKEN_CONTINUE:
-    return parse_continue_statement(parser);
-
-  case TOKEN_IF:
-    return parse_if_statement(parser);
-  case TOKEN_WHILE:
-    return parse_while_statement(parser);
-
-  default:
-    return parse_expression_statement(parser);
-  }
-}
-
-// declaration := function_declaration | extern_declaration  -- recovers to the next 'fn' or 'extern' on anything else.
-AstDecl *parse_declaration(Parser *parser) {
-  switch (parser->current.kind) {
-  case TOKEN_FN:
-    return parse_function_declaration(parser, false);
-
-  case TOKEN_STRUCT:
-    return parse_struct_declaration(parser);
-
-  case TOKEN_EXTERN:
-    return parse_extern_declaration(parser);
-
-  default:
-    error_at(parser, parser->current, "Expected declaration.");
-    synchronize_top_level(parser);
-  }
-
-  return NULL;
-}
-
-// type := IDENT | '*' type | '[' [ expression | '_' ] ']' type
-AstType *parse_type(Parser *parser) {
-  Token token = parser->current;
-
-  switch (token.kind) {
-  case TOKEN_IDENT:
-    return parse_named_type(parser);
-  case TOKEN_STAR:
-    return parse_pointer_type(parser);
-  case TOKEN_LBRACKET:
-    return parse_array_type(parser);
-
-  default:
-    return NULL;
-  }
-
-  return NULL;
-}
-
 // program := { declaration } EOF
 AstProgram *parse_program(Parser *parser) {
   AstDecl **decls = NULL;
 
   while (!check(parser, TOKEN_EOF)) {
-    AstDecl *decl = parse_declaration(parser);
+    AstDecl *decl = parse_decl(parser);
     if (decl) {
       da_append(decls, decl);
     }
@@ -1453,59 +1456,59 @@ AstProgram *parse_program(Parser *parser) {
 // Entries run from the loosest infix operator to the tightest, mirroring Precedence; prefix-only tokens stay PREC_NONE.
 static const ParseRule rules[TOKEN_COUNT] = {
   // Operands
-  [TOKEN_IDENT] = {PREC_NONE, parse_identifier, NULL},
-  [TOKEN_INT] = {PREC_NONE, parse_int_literal, NULL},
-  [TOKEN_FLOAT] = {PREC_NONE, parse_float_literal, NULL},
-  [TOKEN_CHAR] = {PREC_NONE, parse_char_literal, NULL},
-  [TOKEN_STRING] = {PREC_NONE, parse_string_literal, NULL},
+  [TOKEN_IDENT] = {PREC_NONE, parse_expr_identifier, NULL},
+  [TOKEN_INT] = {PREC_NONE, parse_expr_literal_int, NULL},
+  [TOKEN_FLOAT] = {PREC_NONE, parse_expr_literal_float, NULL},
+  [TOKEN_CHAR] = {PREC_NONE, parse_expr_literal_char, NULL},
+  [TOKEN_STRING] = {PREC_NONE, parse_expr_literal_string, NULL},
 
-  [TOKEN_TRUE] = {PREC_NONE, parse_keyword_literal, NULL},
-  [TOKEN_FALSE] = {PREC_NONE, parse_keyword_literal, NULL},
-  [TOKEN_NULL] = {PREC_NONE, parse_keyword_literal, NULL},
-  [TOKEN_UNDEF] = {PREC_NONE, parse_keyword_literal, NULL},
+  [TOKEN_TRUE] = {PREC_NONE, parse_expr_literal_keyword, NULL},
+  [TOKEN_FALSE] = {PREC_NONE, parse_expr_literal_keyword, NULL},
+  [TOKEN_NULL] = {PREC_NONE, parse_expr_literal_keyword, NULL},
+  [TOKEN_UNDEF] = {PREC_NONE, parse_expr_literal_keyword, NULL},
 
   // Prefix-only operators
-  [TOKEN_BANG] = {PREC_NONE, parse_unary, NULL},
-  [TOKEN_TILDE] = {PREC_NONE, parse_unary, NULL},
+  [TOKEN_BANG] = {PREC_NONE, parse_expr_unary, NULL},
+  [TOKEN_TILDE] = {PREC_NONE, parse_expr_unary, NULL},
 
   // Assignment
-  [TOKEN_ASSIGN] = {PREC_ASSIGNMENT, NULL, parse_assignment},
+  [TOKEN_ASSIGN] = {PREC_ASSIGNMENT, NULL, parse_expr_assign},
 
   // Logical
-  [TOKEN_OR] = {PREC_LOGIC_OR, NULL, parse_logical},
-  [TOKEN_AND] = {PREC_LOGIC_AND, NULL, parse_logical},
+  [TOKEN_OR] = {PREC_LOGIC_OR, NULL, parse_expr_logical},
+  [TOKEN_AND] = {PREC_LOGIC_AND, NULL, parse_expr_logical},
 
   // Equality
-  [TOKEN_EQ] = {PREC_EQUALITY, NULL, parse_binary},
-  [TOKEN_NOT_EQ] = {PREC_EQUALITY, NULL, parse_binary},
+  [TOKEN_EQ] = {PREC_EQUALITY, NULL, parse_expr_binary},
+  [TOKEN_NOT_EQ] = {PREC_EQUALITY, NULL, parse_expr_binary},
 
   // Comparison
-  [TOKEN_LESS] = {PREC_COMPARISON, NULL, parse_binary},
-  [TOKEN_GREATER] = {PREC_COMPARISON, NULL, parse_binary},
-  [TOKEN_LESS_EQ] = {PREC_COMPARISON, NULL, parse_binary},
-  [TOKEN_GREATER_EQ] = {PREC_COMPARISON, NULL, parse_binary},
+  [TOKEN_LESS] = {PREC_COMPARISON, NULL, parse_expr_binary},
+  [TOKEN_GREATER] = {PREC_COMPARISON, NULL, parse_expr_binary},
+  [TOKEN_LESS_EQ] = {PREC_COMPARISON, NULL, parse_expr_binary},
+  [TOKEN_GREATER_EQ] = {PREC_COMPARISON, NULL, parse_expr_binary},
 
   // Bitwise and shifts; '&' is also the prefix address-of
-  [TOKEN_PIPE] = {PREC_BIT_OR, NULL, parse_binary},
-  [TOKEN_CARET] = {PREC_BIT_XOR, NULL, parse_binary},
-  [TOKEN_AMP] = {PREC_BIT_AND, parse_addr_of, parse_binary},
-  [TOKEN_SHL] = {PREC_SHIFT, NULL, parse_binary},
-  [TOKEN_SHR] = {PREC_SHIFT, NULL, parse_binary},
+  [TOKEN_PIPE] = {PREC_BIT_OR, NULL, parse_expr_binary},
+  [TOKEN_CARET] = {PREC_BIT_XOR, NULL, parse_expr_binary},
+  [TOKEN_AMP] = {PREC_BIT_AND, parse_expr_addr_of, parse_expr_binary},
+  [TOKEN_SHL] = {PREC_SHIFT, NULL, parse_expr_binary},
+  [TOKEN_SHR] = {PREC_SHIFT, NULL, parse_expr_binary},
 
   // Additive; '-' is also the prefix negation
-  [TOKEN_PLUS] = {PREC_TERM, NULL, parse_binary},
-  [TOKEN_MINUS] = {PREC_TERM, parse_unary, parse_binary},
+  [TOKEN_PLUS] = {PREC_TERM, NULL, parse_expr_binary},
+  [TOKEN_MINUS] = {PREC_TERM, parse_expr_unary, parse_expr_binary},
 
   // Multiplicative
-  [TOKEN_STAR] = {PREC_FACTOR, NULL, parse_binary},
-  [TOKEN_SLASH] = {PREC_FACTOR, NULL, parse_binary},
+  [TOKEN_STAR] = {PREC_FACTOR, NULL, parse_expr_binary},
+  [TOKEN_SLASH] = {PREC_FACTOR, NULL, parse_expr_binary},
 
   // Cast
-  [TOKEN_AS] = {PREC_CAST, NULL, parse_cast},
+  [TOKEN_AS] = {PREC_CAST, NULL, parse_expr_cast},
 
   // Postfix and grouping; '(' is the call operator and also starts a parenthesised expression
-  [TOKEN_LPAREN] = {PREC_POSTFIX, parse_grouping, parse_call},
-  [TOKEN_LBRACKET] = {PREC_POSTFIX, parse_array_literal, parse_subscript},
-  [TOKEN_DOT] = {PREC_POSTFIX, NULL, parse_member},
-  [TOKEN_DEREF] = {PREC_POSTFIX, NULL, parse_deref},
+  [TOKEN_LPAREN] = {PREC_POSTFIX, parse_grouping, parse_expr_call},
+  [TOKEN_LBRACKET] = {PREC_POSTFIX, parse_expr_array_literal, parse_expr_subscript},
+  [TOKEN_DOT] = {PREC_POSTFIX, NULL, parse_expr_member},
+  [TOKEN_DEREF] = {PREC_POSTFIX, NULL, parse_expr_deref},
 };

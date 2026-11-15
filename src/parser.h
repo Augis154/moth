@@ -19,9 +19,9 @@ typedef struct {
 
 void parser_init(Parser *parser, CompilationUnit *comp_unit);
 
-AstExpr *parse_expression(Parser *parser);
-AstStmt *parse_statement(Parser *parser);
-AstDecl *parse_declaration(Parser *parser);
+AstExpr *parse_expr(Parser *parser);
+AstStmt *parse_stmt(Parser *parser);
+AstDecl *parse_decl(Parser *parser);
 AstType *parse_type(Parser *parser);
 
 AstProgram *parse_program(Parser *parser);

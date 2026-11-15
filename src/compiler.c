@@ -12,7 +12,7 @@
 
 // Compilation unit functions
 
-void cu_init(CompilationUnit *comp_unit) {
+void comp_unit_init(CompilationUnit *comp_unit) {
   comp_unit->filename = NULL;
   comp_unit->source = NULL;
   comp_unit->source_len = 0;
@@ -25,7 +25,7 @@ void cu_init(CompilationUnit *comp_unit) {
   comp_unit->had_error = false;
 }
 
-void cu_free(CompilationUnit *comp_unit) {
+void comp_unit_free(CompilationUnit *comp_unit) {
   if (comp_unit->source) {
     free((void *)comp_unit->source);
     comp_unit->source = NULL;
@@ -37,7 +37,7 @@ void cu_free(CompilationUnit *comp_unit) {
   arena_free(&comp_unit->arena);
 }
 
-void cu_read_source_file(CompilationUnit *comp_unit, const char *filename) {
+void comp_unit_read_source_file(CompilationUnit *comp_unit, const char *filename) {
   comp_unit->filename = filename;
 
   FILE *file = fopen(filename, "rb");
@@ -84,11 +84,11 @@ void cu_read_source_file(CompilationUnit *comp_unit, const char *filename) {
 
 bool compile_file(const char *input_path, const char *output_path) {
   CompilationUnit comp_unit;
-  cu_init(&comp_unit);
+  comp_unit_init(&comp_unit);
 
-  cu_read_source_file(&comp_unit, input_path);
+  comp_unit_read_source_file(&comp_unit, input_path);
   if (comp_unit.had_error) {
-    cu_free(&comp_unit);
+    comp_unit_free(&comp_unit);
     return false;
   }
 
@@ -97,7 +97,7 @@ bool compile_file(const char *input_path, const char *output_path) {
 
   AstProgram *program = parse_program(&parser);
   if (comp_unit.had_error) {
-    cu_free(&comp_unit);
+    comp_unit_free(&comp_unit);
     return false;
   }
 
@@ -107,19 +107,19 @@ bool compile_file(const char *input_path, const char *output_path) {
   sema_program(&sema_ctx, program);
   if (comp_unit.had_error) {
     sema_free(&sema_ctx);
-    cu_free(&comp_unit);
+    comp_unit_free(&comp_unit);
     return false;
   }
 
-  IrGenContext ir_context;
-  gen_ir_init(&ir_context, &comp_unit, &sema_ctx);
-  gen_ir(&ir_context, program);
+  IrGenContext ir_ctx;
+  gen_ir_init(&ir_ctx, &comp_unit, &sema_ctx);
+  gen_ir(&ir_ctx, program);
 
-  bool ok = generate_qbe(output_path, ir_context.module);
+  bool ok = gen_qbe(output_path, ir_ctx.module);
 
-  gen_ir_free(&ir_context);
+  gen_ir_free(&ir_ctx);
   sema_free(&sema_ctx);
-  cu_free(&comp_unit);
+  comp_unit_free(&comp_unit);
 
   return ok;
 }

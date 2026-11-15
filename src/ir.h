@@ -88,8 +88,8 @@ typedef struct {
   uint32_t id;
 } IrDataId;
 
-#define NULL_REG ((IrReg){0})
-#define NULL_LABEL ((IrLabel){0})
+#define IR_NULL_REG ((IrReg){0})
+#define IR_NULL_LABEL ((IrLabel){0})
 
 // A stack slot; both fields come from the `Type` of the value it holds.
 typedef struct {
@@ -191,7 +191,7 @@ typedef struct {
   IrReg *params;
   uint32_t param_count;
 
-  IrInstr *buffer;
+  IrInstr *instrs;
   IrType *reg_types; // Indexed by register id; entry 0 is unused
 } IrFunction;
 

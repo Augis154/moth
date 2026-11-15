@@ -183,11 +183,11 @@ static Token identifier(Lexer *lex) {
   }
 
   char *token_start = (char *)lex->token_start;
-  size_t token_length = (size_t)(lex->current - lex->token_start);
+  size_t token_len = (size_t)(lex->current - lex->token_start);
 
   for (size_t i = 0; i < KEYWORD_COUNT; i++) {
     const Keyword keyword = keywords[i];
-    if (token_length == keyword.name_len && strncmp(token_start, keyword.name, token_length) == 0) {
+    if (token_len == keyword.name_len && strncmp(token_start, keyword.name, token_len) == 0) {
       return new_token(lex, keyword.kind);
     }
   }
