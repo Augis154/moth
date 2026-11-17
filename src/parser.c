@@ -43,7 +43,7 @@ typedef struct {
 static const ParseRule rules[TOKEN_COUNT];
 
 static const ParseRule *get_rule(TokenKind kind) {
-  if (kind < 0 || kind >= TOKEN_COUNT) return NULL;
+  assert(kind < TOKEN_COUNT && "get_rule: not a token kind");
   return &rules[kind];
 }
 
@@ -107,6 +107,12 @@ static bool consume(Parser *parser, TokenKind kind, const char *message) {
   return false;
 }
 
+// Consumes the token of `kind` that the caller's dispatcher has already seen.
+static void expect(Parser *parser, TokenKind kind) {
+  assert(check(parser, kind) && "expect: the dispatcher did not check the token");
+  advance(parser);
+}
+
 static const char *parse_identifier_name(Parser *parser, Token token) {
   if (token.kind != TOKEN_IDENT) {
     error_at(parser, token, "Expected identifier.");
@@ -118,35 +124,39 @@ static const char *parse_identifier_name(Parser *parser, Token token) {
 
 // Error recovery
 
-// Skips to a likely statement boundary (after ';' or before a statement keyword or '}') and leaves panic mode.
+// Whether `kind` starts a statement or a declaration; such a token never occurs inside an expression or a type.
+static bool starts_statement(TokenKind kind) {
+  switch (kind) {
+  case TOKEN_LBRACE:
+  case TOKEN_VAR:
+  case TOKEN_FN:
+  case TOKEN_STRUCT:
+  case TOKEN_EXTERN:
+  case TOKEN_IF:
+  case TOKEN_WHILE:
+  case TOKEN_RETURN:
+  case TOKEN_BREAK:
+  case TOKEN_CONTINUE:
+    return true;
+
+  default:
+    return false;
+  }
+}
+
+// Skips to a likely statement boundary (after ';', or before '}' or the start of a statement) and leaves panic mode.
 static void synchronize(Parser *parser) {
   parser->panic_mode = false;
 
   while (!check(parser, TOKEN_EOF)) {
     if (parser->previous.kind == TOKEN_SEMICOLON) return;
-
-    switch (parser->current.kind) {
-    case TOKEN_RBRACE:
-    case TOKEN_VAR:
-    case TOKEN_FN:
-    case TOKEN_STRUCT:
-    case TOKEN_EXTERN:
-    case TOKEN_IF:
-    case TOKEN_WHILE:
-    case TOKEN_RETURN:
-    case TOKEN_BREAK:
-    case TOKEN_CONTINUE:
-      return;
-
-    default:
-      break;
-    }
+    if (check(parser, TOKEN_RBRACE) || starts_statement(parser->current.kind)) return;
 
     advance(parser);
   }
 }
 
-// Skips to the next top-level 'fn' and leaves panic mode.
+// Skips to the next top-level declaration ('fn', 'struct' or 'extern') and leaves panic mode.
 static void synchronize_top_level(Parser *parser) {
   parser->panic_mode = false;
 
@@ -164,6 +174,59 @@ static void synchronize_top_level(Parser *parser) {
 
     advance(parser);
   }
+}
+
+// Skips to the end of the current list element: the `,` after it, or the token that closes the list. Nested brackets
+// are skipped, and a `;` or the start of a statement ends the search, since the list is not closed then.
+static void skip_to_element_end(Parser *parser) {
+  uint32_t depth = 0;
+
+  while (!check(parser, TOKEN_EOF)) {
+    TokenKind kind = parser->current.kind;
+
+    if (starts_statement(kind)) return;
+
+    bool closes = kind == TOKEN_RPAREN || kind == TOKEN_RBRACKET || kind == TOKEN_RBRACE;
+    if (depth == 0 && (closes || kind == TOKEN_COMMA || kind == TOKEN_SEMICOLON)) return;
+
+    if (kind == TOKEN_LPAREN || kind == TOKEN_LBRACKET || kind == TOKEN_DOT_LBRACE) depth++;
+    if (closes) depth--;
+
+    advance(parser);
+  }
+}
+
+// Skips the rest of a list up to and including `close`; it stops early where `skip_to_element_end` does.
+static void skip_list_rest(Parser *parser, TokenKind close) {
+  do {
+    skip_to_element_end(parser);
+  } while (match(parser, TOKEN_COMMA));
+
+  match(parser, close);
+}
+
+// Whether a list element `parsed` without an error. A bad element is skipped and panic mode left, so that the next
+// element reports its own errors.
+static bool list_element_ok(Parser *parser, bool parsed) {
+  if (parsed && !parser->panic_mode) return true;
+
+  skip_to_element_end(parser);
+  parser->panic_mode = false;
+
+  return false;
+}
+
+// Consumes the `close` of a list whose elements were `elements_ok`. A list with an error is skipped to its end and
+// leaves panic mode set, so that the statement around it is resynchronized.
+static bool list_close(Parser *parser, TokenKind close, bool elements_ok, const char *message) {
+  if (elements_ok && match(parser, close)) return true;
+
+  if (elements_ok) error_at(parser, parser->previous, "%s", message);
+
+  skip_list_rest(parser, close);
+  parser->panic_mode = true;
+
+  return false;
 }
 
 // Literal decoding functions
@@ -388,25 +451,22 @@ static const char *escape_str(Parser *parser, const char *str, size_t str_len, s
 
 // expression := prefix { infix expression }  -- keeps parsing infix operators of at least `precedence`.
 static AstExpr *parse_precedence(Parser *parser, Precedence precedence) {
-  advance(parser);
-  ParsePrefixFn prefix_rule = get_rule(parser->previous.kind)->prefix;
+  ParsePrefixFn prefix_rule = get_rule(parser->current.kind)->prefix;
 
   if (!prefix_rule) {
-    // Handle error: no prefix rule for this token
-    error_at(parser, parser->previous, "Expected expression.");
+    error_at(parser, parser->current, "Expected expression.");
     return NULL;
   }
+
+  advance(parser);
 
   AstExpr *left = prefix_rule(parser);
 
   while (precedence <= get_rule(parser->current.kind)->precedence) {
     advance(parser);
-    ParseInfixFn infix_rule = get_rule(parser->previous.kind)->infix;
 
-    if (!infix_rule) {
-      // Handle error: no infix rule for this token
-      return left;
-    }
+    ParseInfixFn infix_rule = get_rule(parser->previous.kind)->infix;
+    assert(infix_rule && "parse_precedence: a token with a precedence has no infix rule");
 
     left = infix_rule(parser, left);
   }
@@ -424,8 +484,7 @@ static UnaryOp get_unary_op(TokenKind kind) {
     return UNOP_BIT_NOT;
 
   default:
-    error_at(NULL, (Token){.kind = kind}, "Invalid unary operator.");
-    return -1;
+    UNREACHABLE("get_unary_op: not a unary operator");
   }
 }
 
@@ -465,8 +524,7 @@ static BinaryOp get_binary_op(TokenKind kind) {
     return BINOP_SHR;
 
   default:
-    error_at(NULL, (Token){.kind = kind}, "Invalid binary operator.");
-    return -1;
+    UNREACHABLE("get_binary_op: not a binary operator");
   }
 }
 
@@ -478,8 +536,7 @@ static LogicalOp get_logical_op(TokenKind kind) {
     return LOGIC_AND;
 
   default:
-    error_at(NULL, (Token){.kind = kind}, "Invalid logical operator.");
-    return -1;
+    UNREACHABLE("get_logical_op: not a logical operator");
   }
 }
 
@@ -660,77 +717,98 @@ static AstExpr *parse_expr_identifier(Parser *parser) {
   return expr;
 }
 
-// '[' elements ']' | '[' expression ';' expression ']', where an element is [ expression ':' ] expression
-static AstExpr *parse_expr_array_literal(Parser *parser) {
-  SourceLoc start_loc = parser->previous.loc;
+// [ expression ':' ] expression  -- one element of an array literal; `first` is its first expression when the caller
+// has parsed it already. Returns false after reporting an error.
+static bool parse_array_literal_element(Parser *parser, AstExpr *first, AstArrayElement *element) {
+  if (!first) first = parse_expr(parser);
+  if (!first) return false;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ARRAY_LITERAL, start_loc);
+  AstExpr *index_expr = NULL;
+  AstExpr *value = first;
+
+  if (match(parser, TOKEN_COLON)) {
+    index_expr = first;
+    value = parse_expr(parser);
+    if (!value) return false;
+  }
+
+  *element = (AstArrayElement){
+    .index_expr = index_expr,
+    .value = value,
+    .loc = value->loc,
+  };
+
+  return true;
+}
+
+// '[' [ element { ',' element } [ ',' ] ] ']' | '[' expression ';' expression ']'  -- the '[' is already consumed.
+// A bad element is skipped, so every element can report its own error.
+static AstExpr *parse_expr_array_literal(Parser *parser) {
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ARRAY_LITERAL, parser->previous.loc);
   AstExprArrayLiteral *array_literal_expr = &expr->expr_array_literal;
-  array_literal_expr->is_repeat = false;
-  array_literal_expr->list.elements = NULL;
-  array_literal_expr->list.element_count = 0;
-  array_literal_expr->list.is_sparse = false;
 
   if (match(parser, TOKEN_RBRACKET)) {
     return expr;
   }
 
   AstExpr *first = parse_expr(parser);
-  if (!first) return NULL;
+  if (!first) {
+    skip_to_element_end(parser);
+    match(parser, TOKEN_SEMICOLON);
+    skip_list_rest(parser, TOKEN_RBRACKET);
+    return NULL;
+  }
 
-  // 1. Repeat syntax: [val; count]
+  // Repeat syntax: [val; count]
   if (match(parser, TOKEN_SEMICOLON)) {
+    AstExpr *length_expr = parse_expr(parser);
+    if (!length_expr) {
+      skip_list_rest(parser, TOKEN_RBRACKET);
+      return NULL;
+    }
+
     array_literal_expr->is_repeat = true;
     array_literal_expr->repeat.value = first;
-    array_literal_expr->repeat.length_expr = parse_expr(parser);
-    if (!array_literal_expr->repeat.length_expr) return NULL;
+    array_literal_expr->repeat.length_expr = length_expr;
 
-    consume(parser, TOKEN_RBRACKET, "Expected ']' after array repeat length.");
+    if (!consume(parser, TOKEN_RBRACKET, "Expected ']' after array repeat length.")) return NULL;
+
     return expr;
   }
 
   AstArrayElement *elements = NULL;
+  bool elements_ok = true;
 
-  // 2. Parse elements (sequential or sparse):
-  while (true) {
-    AstExpr *index_expr = NULL;
-    AstExpr *value_expr = NULL;
+  // Parse elements (sequential or sparse)
+  do {
+    AstArrayElement element;
+    bool element_ok = parse_array_literal_element(parser, first, &element);
 
-    if (match(parser, TOKEN_COLON)) {
-      array_literal_expr->list.is_sparse = true;
-      index_expr = first;
-      value_expr = parse_expr(parser);
-      if (!value_expr) return NULL;
+    if (list_element_ok(parser, element_ok)) {
+      da_append(elements, element);
+      if (element.index_expr) array_literal_expr->list.is_sparse = true;
     } else {
-      value_expr = first;
+      elements_ok = false;
     }
 
-    AstArrayElement element = {
-      .index_expr = index_expr,
-      .value = value_expr,
-      .loc = value_expr->loc,
-    };
-    da_append(elements, element);
+    first = NULL;
+  } while (match(parser, TOKEN_COMMA) && !check(parser, TOKEN_RBRACKET));
 
-    if (!match(parser, TOKEN_COMMA) || check(parser, TOKEN_RBRACKET)) break;
-
-    first = parse_expr(parser);
-    if (!first) return NULL;
+  if (!list_close(parser, TOKEN_RBRACKET, elements_ok, "Expected ']' after array elements.")) {
+    da_free(elements);
+    return NULL;
   }
 
-  consume(parser, TOKEN_RBRACKET, "Expected ']' after array elements.");
-
-  AstArrayElement *element_array =
-    arena_copy_array(&parser->comp_unit->arena, elements, da_len(elements), sizeof(AstArrayElement));
-
-  array_literal_expr->list.elements = element_array;
-  array_literal_expr->list.element_count = da_len(elements);
+  uint32_t element_count = da_len(elements);
+  array_literal_expr->list.elements =
+    arena_copy_array(&parser->comp_unit->arena, elements, element_count, sizeof(AstArrayElement));
+  array_literal_expr->list.element_count = element_count;
   da_free(elements);
 
   return expr;
 }
 
-// IDENT ':' expression  -- one initialiser of a struct literal.
+// IDENT ':' expression  -- one initialiser of a struct literal. Returns false after reporting an error.
 static bool parse_struct_literal_field(Parser *parser, AstExprStructLiteralField *field) {
   SourceLoc field_loc = parser->current.loc;
 
@@ -757,27 +835,28 @@ static bool parse_struct_literal_field(Parser *parser, AstExprStructLiteralField
 }
 
 // [ field { ',' field } [ ',' ] ] '}'  -- a struct literal after its '.{', with `ast_type` NULL when the type comes
-// from context.
+// from context. A bad field is skipped, so every field can report its own error.
 static AstExpr *parse_struct_literal(Parser *parser, AstType *ast_type, SourceLoc start_loc) {
   AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_STRUCT_LITERAL, start_loc);
   expr->expr_struct_literal.type = ast_type;
 
   AstExprStructLiteralField *fields = NULL;
+  bool fields_ok = true;
 
   while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
     AstExprStructLiteralField field;
+    bool field_ok = parse_struct_literal_field(parser, &field);
 
-    if (!parse_struct_literal_field(parser, &field)) {
-      da_free(fields);
-      return NULL;
+    if (list_element_ok(parser, field_ok)) {
+      da_append(fields, field);
+    } else {
+      fields_ok = false;
     }
-
-    da_append(fields, field);
 
     if (!match(parser, TOKEN_COMMA)) break;
   }
 
-  if (!consume(parser, TOKEN_RBRACE, "Expected '}' after struct literal fields.")) {
+  if (!list_close(parser, TOKEN_RBRACE, fields_ok, "Expected '}' after struct literal fields.")) {
     da_free(fields);
     return NULL;
   }
@@ -797,6 +876,7 @@ static AstExpr *parse_expr_struct_literal_named(Parser *parser, AstExpr *left) {
 
   if (left->kind != AST_EXPR_IDENTIFIER) {
     error_at(parser, parser->previous, "Expected struct type name before '.{'.");
+    skip_list_rest(parser, TOKEN_RBRACE);
     return NULL;
   }
 
@@ -837,7 +917,7 @@ static AstExpr *parse_expr_addr_of(Parser *parser) {
 static AstExpr *parse_expr_deref(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_DEREF, parser->previous.loc);
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_DEREF, left->loc);
   expr->expr_deref.operand = left;
 
   return expr;
@@ -851,6 +931,7 @@ static AstExpr *parse_expr_subscript(Parser *parser, AstExpr *left) {
   AstExpr *index = NULL;
   if (!check(parser, TOKEN_COLON)) {
     index = parse_expr(parser);
+    if (!index) return NULL;
   }
 
   if (match(parser, TOKEN_COLON)) {
@@ -858,6 +939,7 @@ static AstExpr *parse_expr_subscript(Parser *parser, AstExpr *left) {
 
     if (!check(parser, TOKEN_RBRACKET)) {
       end_index = parse_expr(parser);
+      if (!end_index) return NULL;
     }
 
     consume(parser, TOKEN_RBRACKET, "Expected ']' after slice index.");
@@ -869,8 +951,6 @@ static AstExpr *parse_expr_subscript(Parser *parser, AstExpr *left) {
 
     return expr;
   }
-
-  if (!index) return NULL;
 
   consume(parser, TOKEN_RBRACKET, "Expected ']' after subscript index.");
 
@@ -898,31 +978,36 @@ static AstExpr *parse_expr_member(Parser *parser, AstExpr *left) {
 }
 
 // callee '(' [ expression { ',' expression } [ ',' ] ] ')'  -- the '(' is already consumed.
+// A bad argument is skipped, so every argument can report its own error.
 static AstExpr *parse_expr_call(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
   AstExpr **args = NULL;
+  bool args_ok = true;
+
   while (!check(parser, TOKEN_RPAREN) && !check(parser, TOKEN_EOF)) {
     AstExpr *arg = parse_expr(parser);
-    if (arg) {
+
+    if (list_element_ok(parser, arg != NULL)) {
       da_append(args, arg);
+    } else {
+      args_ok = false;
     }
 
-    if (!match(parser, TOKEN_COMMA)) {
-      break;
-    }
+    if (!match(parser, TOKEN_COMMA)) break;
   }
 
-  consume(parser, TOKEN_RPAREN, "Expected ')' after function arguments.");
+  if (!list_close(parser, TOKEN_RPAREN, args_ok, "Expected ')' after function arguments.")) {
+    da_free(args);
+    return NULL;
+  }
 
   AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CALL, left->loc);
   expr->expr_call.callee = left;
 
-  AstExpr **arg_array = arena_copy_array(&parser->comp_unit->arena, args, da_len(args), sizeof(AstExpr *));
-
-  expr->expr_call.args = arg_array;
-  expr->expr_call.arg_count = da_len(args);
-
+  uint32_t arg_count = da_len(args);
+  expr->expr_call.args = arena_copy_array(&parser->comp_unit->arena, args, arg_count, sizeof(AstExpr *));
+  expr->expr_call.arg_count = arg_count;
   da_free(args);
 
   return expr;
@@ -945,14 +1030,13 @@ static AstExpr *parse_expr_unary(Parser *parser) {
 
 // left OP right, where OP is an arithmetic, comparison, bitwise or shift operator; left-associative.
 static AstExpr *parse_expr_binary(Parser *parser, AstExpr *left) {
-  SourceLoc start_loc = parser->previous.loc;
   TokenKind operator = parser->previous.kind;
 
   const ParseRule *rule = get_rule(operator);
   AstExpr *right = parse_precedence(parser, rule->precedence + 1);
   if (!left || !right) return NULL;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_BINARY, start_loc);
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_BINARY, left->loc);
   expr->expr_binary.op = get_binary_op(operator);
   expr->expr_binary.left = left;
   expr->expr_binary.right = right;
@@ -962,14 +1046,13 @@ static AstExpr *parse_expr_binary(Parser *parser, AstExpr *left) {
 
 // left ( '&&' | '||' ) right  -- left-associative.
 static AstExpr *parse_expr_logical(Parser *parser, AstExpr *left) {
-  SourceLoc start_loc = parser->previous.loc;
   TokenKind operator = parser->previous.kind;
 
   const ParseRule *rule = get_rule(operator);
   AstExpr *right = parse_precedence(parser, rule->precedence + 1);
   if (!left || !right) return NULL;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LOGICAL, start_loc);
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LOGICAL, left->loc);
   expr->expr_logical.op = get_logical_op(operator);
   expr->expr_logical.left = left;
   expr->expr_logical.right = right;
@@ -980,15 +1063,11 @@ static AstExpr *parse_expr_logical(Parser *parser, AstExpr *left) {
 // expression 'as' type  -- the 'as' is already consumed.
 static AstExpr *parse_expr_cast(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
-  SourceLoc start_loc = parser->previous.loc;
 
   AstType *ast_type = parse_type(parser);
-  if (!ast_type) {
-    error_at(parser, parser->current, "Expected type after 'as'.");
-    return NULL;
-  }
+  if (!ast_type) return NULL;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CAST, start_loc);
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_CAST, left->loc);
   expr->expr_cast.operand = left;
   expr->expr_cast.target_type = ast_type;
 
@@ -999,12 +1078,10 @@ static AstExpr *parse_expr_cast(Parser *parser, AstExpr *left) {
 static AstExpr *parse_expr_assign(Parser *parser, AstExpr *left) {
   if (!left) return NULL;
 
-  SourceLoc start_loc = left->loc;
-
   AstExpr *right = parse_precedence(parser, PREC_ASSIGNMENT);
   if (!right) return NULL;
 
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ASSIGN, start_loc);
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_ASSIGN, left->loc);
   expr->expr_assign.target = left;
   expr->expr_assign.value = right;
 
@@ -1018,17 +1095,17 @@ AstExpr *parse_expr(Parser *parser) {
 
 // Statement parsing functions
 
-static AstDecl *parse_decl_function(Parser *parser, bool is_extern);
-
-// '{' { statement } '}'
+// '{' { statement } '}'  -- NULL when the '{' is missing, so that what follows stays in the enclosing block.
 static AstStmt *parse_stmt_block(Parser *parser) {
-  SourceLoc block_start = parser->current.loc;
+  SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_LBRACE, "Expected '{' to start block.");
+  if (!consume(parser, TOKEN_LBRACE, "Expected '{' to start block.")) return NULL;
 
   AstStmt **stmts = NULL;
 
   while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+    const char *stmt_start = parser->current.lexeme;
+
     AstStmt *inner_stmt = parse_stmt(parser);
     if (inner_stmt) {
       da_append(stmts, inner_stmt);
@@ -1036,12 +1113,17 @@ static AstStmt *parse_stmt_block(Parser *parser) {
 
     if (parser->panic_mode) {
       synchronize(parser);
+
+      // A token no statement can start with, such as `)`, must not keep the loop from moving on
+      if (parser->current.lexeme == stmt_start && !check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+        advance(parser);
+      }
     }
   }
 
   consume(parser, TOKEN_RBRACE, "Expected '}' to end block.");
 
-  AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_BLOCK, block_start);
+  AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_BLOCK, start_loc);
 
   AstStmt **stmt_array = arena_copy_array(&parser->comp_unit->arena, stmts, da_len(stmts), sizeof(AstStmt *));
 
@@ -1060,6 +1142,8 @@ static AstStmt *parse_stmt_expression(Parser *parser) {
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after expression.");
 
+  if (!expr) return NULL;
+
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_EXPRESSION, start_loc);
   stmt->stmt_expression.expression = expr;
 
@@ -1068,31 +1152,22 @@ static AstStmt *parse_stmt_expression(Parser *parser) {
 
 // 'var' IDENT [ ':' type ] [ '=' expression ] ';'  -- needs a type or an initializer.
 static AstStmt *parse_stmt_local_var(Parser *parser) {
-  consume(parser, TOKEN_VAR, "Expected 'var' keyword for variable declaration.");
+  expect(parser, TOKEN_VAR);
   consume(parser, TOKEN_IDENT, "Expected variable name after 'var'.");
 
   Token name_token = parser->previous;
 
   AstType *ast_type = NULL;
-  if (match(parser, TOKEN_COLON)) {
-    ast_type = parse_type(parser);
-    if (!ast_type) {
-      error_at(parser,
-               parser->previous,
-               "Expected type after ':' in declaration of variable '%.*s'.",
-               (int)name_token.lexeme_len,
-               name_token.lexeme);
-    }
-  }
+  bool has_type = match(parser, TOKEN_COLON);
+  if (has_type) ast_type = parse_type(parser);
 
   AstExpr *init = NULL;
-  if (match(parser, TOKEN_ASSIGN)) {
-    init = parse_expr(parser);
-  }
+  bool has_init = match(parser, TOKEN_ASSIGN);
+  if (has_init) init = parse_expr(parser);
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after variable declaration.");
 
-  if (!ast_type && !init) {
+  if (!has_type && !has_init) {
     error_at(parser,
              name_token,
              "Variable '%.*s' must have either a type annotation or an initializer.",
@@ -1102,7 +1177,7 @@ static AstStmt *parse_stmt_local_var(Parser *parser) {
   }
 
   const char *var_name = parse_identifier_name(parser, name_token);
-  if (!var_name) return NULL;
+  if (!var_name || (has_type && !ast_type) || (has_init && !init)) return NULL;
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_LOCAL_VAR, name_token.loc);
   stmt->stmt_local_var.name = var_name;
@@ -1116,17 +1191,18 @@ static AstStmt *parse_stmt_local_var(Parser *parser) {
 static AstStmt *parse_stmt_return(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_RETURN, "Expected 'return' keyword for return statement.");
+  expect(parser, TOKEN_RETURN);
 
-  AstExpr *return_expr = NULL;
-  if (!check(parser, TOKEN_SEMICOLON)) {
-    return_expr = parse_expr(parser);
-  }
+  AstExpr *value = NULL;
+  bool has_value = !check(parser, TOKEN_SEMICOLON);
+  if (has_value) value = parse_expr(parser);
 
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after return statement.");
 
+  if (has_value && !value) return NULL;
+
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_RETURN, start_loc);
-  stmt->stmt_return.value = return_expr;
+  stmt->stmt_return.value = value;
 
   return stmt;
 }
@@ -1135,7 +1211,7 @@ static AstStmt *parse_stmt_return(Parser *parser) {
 static AstStmt *parse_stmt_break(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_BREAK, "Expected 'break' keyword for break statement.");
+  expect(parser, TOKEN_BREAK);
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after 'break' statement.");
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_BREAK, start_loc);
@@ -1146,7 +1222,7 @@ static AstStmt *parse_stmt_break(Parser *parser) {
 static AstStmt *parse_stmt_continue(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_CONTINUE, "Expected 'continue' keyword for continue statement.");
+  expect(parser, TOKEN_CONTINUE);
   consume(parser, TOKEN_SEMICOLON, "Expected ';' after 'continue' statement.");
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_CONTINUE, start_loc);
@@ -1157,7 +1233,7 @@ static AstStmt *parse_stmt_continue(Parser *parser) {
 static AstStmt *parse_stmt_if(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_IF, "Expected 'if' keyword for if statement.");
+  expect(parser, TOKEN_IF);
 
   AstExpr *condition = parse_expr(parser);
 
@@ -1166,11 +1242,13 @@ static AstStmt *parse_stmt_if(Parser *parser) {
   }
 
   AstStmt *then_branch = parse_stmt_block(parser);
+  if (!then_branch) return NULL;
 
   AstStmt *else_branch = NULL;
-  if (match(parser, TOKEN_ELSE)) {
-    else_branch = parse_stmt(parser);
-  }
+  bool has_else = match(parser, TOKEN_ELSE);
+  if (has_else) else_branch = parse_stmt(parser);
+
+  if (!condition || (has_else && !else_branch)) return NULL;
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_IF, start_loc);
   stmt->stmt_if.condition = condition;
@@ -1184,7 +1262,7 @@ static AstStmt *parse_stmt_if(Parser *parser) {
 static AstStmt *parse_stmt_while(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_WHILE, "Expected 'while' keyword for while statement.");
+  expect(parser, TOKEN_WHILE);
 
   AstExpr *condition = parse_expr(parser);
 
@@ -1193,6 +1271,7 @@ static AstStmt *parse_stmt_while(Parser *parser) {
   }
 
   AstStmt *body = parse_stmt_block(parser);
+  if (!condition || !body) return NULL;
 
   AstStmt *stmt = ast_stmt_new(&parser->comp_unit->arena, AST_STMT_WHILE, start_loc);
   stmt->stmt_while.condition = condition;
@@ -1201,16 +1280,27 @@ static AstStmt *parse_stmt_while(Parser *parser) {
   return stmt;
 }
 
-// statement := block | variable_declaration | return | break | continue | if | while | expression_statement
+// statement := block | local_var | return | break | continue | if | while | expression ';'
 AstStmt *parse_stmt(Parser *parser) {
   switch (parser->current.kind) {
   case TOKEN_LBRACE:
     return parse_stmt_block(parser);
   case TOKEN_VAR:
     return parse_stmt_local_var(parser);
+
+  // A misplaced declaration is parsed where it stands, so that one error covers all of it
   case TOKEN_FN:
-    error_at(parser, parser->current, "Nested functions are not supported.");
-    parse_decl_function(parser, false);
+  case TOKEN_STRUCT:
+  case TOKEN_EXTERN:
+    error_at(parser, parser->current, "Declarations are only allowed at the top level.");
+    parse_decl(parser);
+    return NULL;
+
+  // So is the statement after an 'else' that follows no 'if'
+  case TOKEN_ELSE:
+    error_at(parser, parser->current, "'else' has no matching 'if'.");
+    advance(parser);
+    parse_stmt(parser);
     return NULL;
 
   case TOKEN_RETURN:
@@ -1236,7 +1326,7 @@ AstStmt *parse_stmt(Parser *parser) {
 // reporting an error.
 static bool parse_typed_name(Parser *parser, const char *what, const char **name, AstType **ast_type) {
   if (!match(parser, TOKEN_IDENT)) {
-    error_at(parser, parser->previous, "Expected %s name.", what);
+    error_at(parser, parser->current, "Expected %s name.", what);
     return false;
   }
 
@@ -1249,12 +1339,8 @@ static bool parse_typed_name(Parser *parser, const char *what, const char **name
   }
 
   *ast_type = parse_type(parser);
-  if (!*ast_type) {
-    error_at(parser, parser->previous, "Expected type for %s '%s'.", what, *name);
-    return false;
-  }
 
-  return true;
+  return *ast_type != NULL;
 }
 
 // [ 'extern' ] 'fn' IDENT '(' [ param { ',' param } [ ',' '...' | ',' ] ] ')' [ ':' type ] ( block | ';' )
@@ -1262,7 +1348,7 @@ static bool parse_typed_name(Parser *parser, const char *what, const char **name
 static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_FN, "Expected 'fn' keyword for function declaration.");
+  expect(parser, TOKEN_FN);
   consume(parser, TOKEN_IDENT, "Expected function name after 'fn'.");
 
   const char *func_name = parse_identifier_name(parser, parser->previous);
@@ -1271,18 +1357,20 @@ static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
   consume(parser, TOKEN_LPAREN, "Expected '(' after function name.");
 
   AstParam *params = NULL;
+  bool params_ok = true;
   bool is_variadic = false;
 
+  // A bad parameter is skipped, so every parameter and the body can report their own errors
   while (!check(parser, TOKEN_RPAREN) && !check(parser, TOKEN_EOF)) {
     SourceLoc param_loc = parser->current.loc;
 
     if (match(parser, TOKEN_ELLIPSIS)) {
       if (!is_extern) {
-        error_at(parser, parser->previous, "Only extern functions can be variadic");
+        error_at(parser, parser->previous, "Only extern functions can be variadic.");
       }
 
-      if (da_len(params) < 1) {
-        error_at(parser, parser->previous, "At least 1 regular argument is required for variadic functions");
+      if (params_ok && da_len(params) < 1) {
+        error_at(parser, parser->previous, "A variadic function needs at least one regular parameter.");
       }
 
       is_variadic = true;
@@ -1291,36 +1379,33 @@ static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
 
     const char *param_name;
     AstType *param_ast_type;
-    if (!parse_typed_name(parser, "parameter", &param_name, &param_ast_type)) {
-      da_free(params);
-      return NULL;
+    bool param_ok = parse_typed_name(parser, "parameter", &param_name, &param_ast_type);
+
+    if (list_element_ok(parser, param_ok)) {
+      AstParam param = {
+        .name = param_name,
+        .type = param_ast_type,
+        .loc = param_loc,
+      };
+      da_append(params, param);
+    } else {
+      params_ok = false;
     }
 
-    AstParam param = {
-      .name = param_name,
-      .type = param_ast_type,
-      .loc = param_loc,
-    };
-    da_append(params, param);
-
-    if (!match(parser, TOKEN_COMMA)) {
-      break;
-    }
+    if (!match(parser, TOKEN_COMMA)) break;
   }
 
-  consume(parser, TOKEN_RPAREN, "Expected ')' after function parameters.");
+  if (!list_close(parser, TOKEN_RPAREN, params_ok, "Expected ')' after function parameters.")) {
+    params_ok = false;
+  }
 
   uint32_t param_count = da_len(params);
   AstParam *param_array = arena_copy_array(&parser->comp_unit->arena, params, param_count, sizeof(AstParam));
   da_free(params);
 
   AstType *return_ast_type = NULL;
-  if (match(parser, TOKEN_COLON)) {
-    return_ast_type = parse_type(parser);
-    if (!return_ast_type) {
-      error_at(parser, parser->previous, "Expected return type after ':' in declaration of function '%s'.", func_name);
-    }
-  }
+  bool has_return_type = match(parser, TOKEN_COLON);
+  if (has_return_type) return_ast_type = parse_type(parser);
 
   AstStmt *func_body = NULL;
 
@@ -1330,9 +1415,13 @@ static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
     error_at(parser, parser->previous, "Function '%s' has no body; add one or declare it 'extern'.", func_name);
     return NULL;
   } else {
+    if (check(parser, TOKEN_LBRACE)) parser->panic_mode = false;
+
     func_body = parse_stmt_block(parser);
     if (!func_body) return NULL;
   }
+
+  if (!params_ok || (has_return_type && !return_ast_type)) return NULL;
 
   AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_FUNCTION, start_loc);
   decl->decl_function.name = func_name;
@@ -1352,39 +1441,43 @@ static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
 static AstDecl *parse_decl_struct(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_STRUCT, "Expected 'struct' keyword for struct declaration.");
+  expect(parser, TOKEN_STRUCT);
   consume(parser, TOKEN_IDENT, "Expected struct name after 'struct'.");
 
   const char *struct_name = parse_identifier_name(parser, parser->previous);
   if (!struct_name) return NULL;
 
-  consume(parser, TOKEN_LBRACE, "Expected '{' after struct name.");
+  if (!consume(parser, TOKEN_LBRACE, "Expected '{' after struct name.")) return NULL;
 
   AstStructField *fields = NULL;
+  bool fields_ok = true;
 
+  // A bad field is skipped, so every field can report its own error
   while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
     SourceLoc field_loc = parser->current.loc;
 
     const char *field_name;
     AstType *field_ast_type;
-    if (!parse_typed_name(parser, "field", &field_name, &field_ast_type)) {
-      da_free(fields);
-      return NULL;
+    bool field_ok = parse_typed_name(parser, "field", &field_name, &field_ast_type);
+
+    if (list_element_ok(parser, field_ok)) {
+      AstStructField field = {
+        .name = field_name,
+        .type = field_ast_type,
+        .loc = field_loc,
+      };
+      da_append(fields, field);
+    } else {
+      fields_ok = false;
     }
 
-    AstStructField field = {
-      .name = field_name,
-      .type = field_ast_type,
-      .loc = field_loc,
-    };
-    da_append(fields, field);
-
-    if (!match(parser, TOKEN_COMMA)) {
-      break;
-    }
+    if (!match(parser, TOKEN_COMMA)) break;
   }
 
-  consume(parser, TOKEN_RBRACE, "Expected '}' after struct declaration.");
+  if (!list_close(parser, TOKEN_RBRACE, fields_ok, "Expected '}' after struct declaration.")) {
+    da_free(fields);
+    return NULL;
+  }
 
   uint32_t field_count = da_len(fields);
   AstStructField *field_array =
@@ -1401,20 +1494,20 @@ static AstDecl *parse_decl_struct(Parser *parser) {
 
 // 'extern' function_declaration  -- a declaration without a body, defined outside this program.
 static AstDecl *parse_decl_extern(Parser *parser) {
-  consume(parser, TOKEN_EXTERN, "Expected 'extern' keyword for extern declaration.");
+  expect(parser, TOKEN_EXTERN);
 
   switch (parser->current.kind) {
   case TOKEN_FN:
     return parse_decl_function(parser, true);
 
   default:
-    error_at(parser, parser->current, "Expected 'fn' after 'extern'.");
+    error_at(parser, parser->previous, "Expected 'fn' after 'extern'.");
   }
 
   return NULL;
 }
 
-// declaration := function_declaration | extern_declaration  -- recovers to the next 'fn' or 'extern' on anything else.
+// declaration := function | struct | 'extern' function  -- recovers to the next declaration on anything else.
 AstDecl *parse_decl(Parser *parser) {
   switch (parser->current.kind) {
   case TOKEN_FN:
@@ -1440,7 +1533,7 @@ AstDecl *parse_decl(Parser *parser) {
 static AstType *parse_type_named(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_IDENT, "Expected type name for named type.");
+  expect(parser, TOKEN_IDENT);
 
   const char *type_name = parse_identifier_name(parser, parser->previous);
   if (!type_name) return NULL;
@@ -1451,11 +1544,11 @@ static AstType *parse_type_named(Parser *parser) {
   return ast_type;
 }
 
-// '*T' type
+// '*' type
 static AstType *parse_type_pointer(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_STAR, "Expected '*' for pointer type.");
+  expect(parser, TOKEN_STAR);
 
   AstType *base_ast_type = parse_type(parser);
   if (!base_ast_type) return NULL;
@@ -1470,7 +1563,7 @@ static AstType *parse_type_pointer(Parser *parser) {
 static AstType *parse_type_array(Parser *parser) {
   SourceLoc start_loc = parser->current.loc;
 
-  consume(parser, TOKEN_LBRACKET, "Expected '[' for array type.");
+  expect(parser, TOKEN_LBRACKET);
 
   if (match(parser, TOKEN_RBRACKET)) {
     AstType *elem_ast_type = parse_type(parser);
@@ -1500,11 +1593,9 @@ static AstType *parse_type_array(Parser *parser) {
   return ast_type;
 }
 
-// type := IDENT | '*' type | '[' [ expression | '_' ] ']' type
+// type := IDENT | '*' type | '[' [ expression | '_' ] ']' type  -- reports an error when no type starts here.
 AstType *parse_type(Parser *parser) {
-  Token token = parser->current;
-
-  switch (token.kind) {
+  switch (parser->current.kind) {
   case TOKEN_IDENT:
     return parse_type_named(parser);
   case TOKEN_STAR:
@@ -1513,10 +1604,9 @@ AstType *parse_type(Parser *parser) {
     return parse_type_array(parser);
 
   default:
+    error_at(parser, parser->current, "Expected type.");
     return NULL;
   }
-
-  return NULL;
 }
 
 // Parser public functions
@@ -1558,7 +1648,7 @@ AstProgram *parse_program(Parser *parser) {
   return program;
 }
 
-// Parse rules and operator mappings
+// Parse rules
 
 // Entries run from the loosest infix operator to the tightest, mirroring Precedence; prefix-only tokens stay PREC_NONE.
 static const ParseRule rules[TOKEN_COUNT] = {
@@ -1616,7 +1706,7 @@ static const ParseRule rules[TOKEN_COUNT] = {
   // Postfix and grouping; '(' is the call operator and also starts a parenthesised expression
   [TOKEN_LPAREN] = {PREC_POSTFIX, parse_grouping, parse_expr_call},
   [TOKEN_LBRACKET] = {PREC_POSTFIX, parse_expr_array_literal, parse_expr_subscript},
+  [TOKEN_DOT_LBRACE] = {PREC_POSTFIX, parse_expr_struct_literal_inferred, parse_expr_struct_literal_named},
   [TOKEN_DOT] = {PREC_POSTFIX, NULL, parse_expr_member},
   [TOKEN_DEREF] = {PREC_POSTFIX, NULL, parse_expr_deref},
-  [TOKEN_DOT_LBRACE] = {PREC_POSTFIX, parse_expr_struct_literal_inferred, parse_expr_struct_literal_named},
 };

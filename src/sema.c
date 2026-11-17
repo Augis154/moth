@@ -758,7 +758,8 @@ static Type *sema_expr_array_literal(SemaContext *ctx, AstExpr *expr, Type *hint
     // Without a hint the element type is the common type of the values
     for (uint32_t i = 0; i < value_count; i++) {
       AstExpr *value = *array_literal_value_slot(expr, i);
-      Type *type = sema_expr(ctx, value);
+      Type *type = sema_expr_hint(ctx, value, elem_type);
+
       if (type == type_error) {
         return type_error;
       }
@@ -2173,6 +2174,9 @@ static void sema_resolve_struct(SemaContext *ctx, AstDecl *decl) {
 static bool sema_resolve_symbol(SemaContext *ctx, Symbol *sym) {
   assert(sym && "sema_resolve_symbol: symbol is NULL");
 
+  assert((sym->kind == SYMBOL_FUNCTION || sym->kind == SYMBOL_TYPE) &&
+         "sema_resolve_symbol: symbol has no declaration");
+
   if (sym->resolve_state == SYMBOL_STATE_RESOLVED) return true;
 
   if (sym->resolve_state == SYMBOL_STATE_RESOLVING) {
@@ -2180,7 +2184,7 @@ static bool sema_resolve_symbol(SemaContext *ctx, Symbol *sym) {
     return false;
   }
 
-  // Builtin types, locals and parameters have nothing to resolve
+  // Builtin types have nothing to resolve
   if (!sym->decl) return true;
 
   sym->resolve_state = SYMBOL_STATE_RESOLVING;
@@ -2265,14 +2269,14 @@ static Type *sema_type_named(SemaContext *ctx, AstType *ast_type, bool need_comp
     return type_error;
   }
 
-  if (need_complete && !sema_resolve_symbol(ctx, sym)) {
-    return type_error;
-  }
-
   if (sym->kind != SYMBOL_TYPE) {
     const char *what = sym->kind == SYMBOL_FUNCTION ? "a function" : "a variable";
     sema_error(
       ctx, ast_type->loc, "'%s' is %s, not a type (declared at line %u)", named_ast_type->name, what, sym->loc.line);
+    return type_error;
+  }
+
+  if (need_complete && !sema_resolve_symbol(ctx, sym)) {
     return type_error;
   }
 
