@@ -125,8 +125,8 @@ bool type_is_internal(Type *type);
 
 // Properties
 bool type_has_storage(Type *type);
-// Whether the integer `value` is representable in the integer type `type`
-bool type_int_fits(Type *type, int64_t value);
+// Whether the integer with the given sign and magnitude is representable in the integer type `type`
+bool type_int_fits(Type *type, bool negative, uint64_t magnitude);
 // How diagnostics spell the type; internal types read as what they are (`integer literal`), not their identifier
 const char *type_display_name(Type *type);
 

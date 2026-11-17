@@ -491,7 +491,7 @@ static AstExpr *parse_expr_literal_int(Parser *parser) {
   const char *start = token.lexeme;
   const char *end = start + token.lexeme_len;
 
-  if (token.lexeme_len > 2 && start[0] == '0') {
+  if (token.lexeme_len >= 2 && start[0] == '0') {
     if (start[1] == 'x' || start[1] == 'X') {
       base = 16;
       start += 2;
@@ -502,6 +502,7 @@ static AstExpr *parse_expr_literal_int(Parser *parser) {
   }
 
   uint64_t value = 0;
+  uint32_t digit_count = 0;
 
   for (const char *current = start; current < end; current++) {
     char c = *current;
@@ -515,21 +516,46 @@ static AstExpr *parse_expr_literal_int(Parser *parser) {
       return NULL;
     }
 
-    value = value * base + digit;
+    if (value > (UINT64_MAX - (uint64_t)digit) / base) {
+      error_at(parser, token, "Integer literal is too large.");
+      return NULL;
+    }
+
+    value = value * base + (uint64_t)digit;
+    digit_count++;
+  }
+
+  if (digit_count == 0) {
+    error_at(parser, token, "Integer literal has no digits.");
+    return NULL;
   }
 
   AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LITERAL, token.loc);
   expr->expr_literal.kind = AST_LITERAL_INT;
-  expr->expr_literal.int_value = value;
+  expr->expr_literal.int_value.magnitude = value;
 
   return expr;
 }
 
-// FLOAT  -- digits '.' digits, with an optional 'f' suffix.
+// FLOAT  -- digits '.' digits with optional '_' separators, or digits with an 'f' suffix.
 static AstExpr *parse_expr_literal_float(Parser *parser) {
-  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LITERAL, parser->previous.loc);
+  Token token = parser->previous;
+
+  ArenaMark mark = arena_mark(&parser->comp_unit->arena);
+  char *digits = arena_alloc(&parser->comp_unit->arena, token.lexeme_len + 1);
+  size_t digit_count = 0;
+
+  for (size_t i = 0; i < token.lexeme_len; i++) {
+    if (token.lexeme[i] != '_') digits[digit_count++] = token.lexeme[i];
+  }
+  digits[digit_count] = '\0';
+
+  double value = strtod(digits, NULL);
+  arena_rollback(&parser->comp_unit->arena, mark);
+
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_LITERAL, token.loc);
   expr->expr_literal.kind = AST_LITERAL_FLOAT;
-  expr->expr_literal.float_value = strtod(parser->previous.lexeme, NULL);
+  expr->expr_literal.float_value = value;
 
   return expr;
 }

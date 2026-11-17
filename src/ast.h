@@ -93,7 +93,10 @@ typedef enum {
 typedef struct {
   AstLiteralKind kind;
   union {
-    int64_t int_value;
+    struct {
+      uint64_t magnitude;
+      bool negative;
+    } int_value;
     double float_value;
     uint32_t code_point;
     struct {

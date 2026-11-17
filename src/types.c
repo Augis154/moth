@@ -147,28 +147,29 @@ const char *type_display_name(Type *type) {
   UNREACHABLE("type_display_name: unhandled type kind");
 }
 
-bool type_int_fits(Type *type, int64_t value) {
+bool type_int_fits(Type *type, bool negative, uint64_t magnitude) {
   switch (type->kind) {
   case TYPE_KIND_U8:
-    return value >= 0 && value <= UINT8_MAX;
+    return !negative && magnitude <= UINT8_MAX;
   case TYPE_KIND_U16:
-    return value >= 0 && value <= UINT16_MAX;
+    return !negative && magnitude <= UINT16_MAX;
   case TYPE_KIND_U32:
-    return value >= 0 && value <= UINT32_MAX;
+    return !negative && magnitude <= UINT32_MAX;
   case TYPE_KIND_U64:
-    return value >= 0;
+    return !negative;
 
+  // A signed type holds one more negative magnitude than positive
   case TYPE_KIND_I8:
-    return value >= INT8_MIN && value <= INT8_MAX;
+    return magnitude <= (negative ? (uint64_t)INT8_MAX + 1 : (uint64_t)INT8_MAX);
   case TYPE_KIND_I16:
-    return value >= INT16_MIN && value <= INT16_MAX;
+    return magnitude <= (negative ? (uint64_t)INT16_MAX + 1 : (uint64_t)INT16_MAX);
   case TYPE_KIND_I32:
-    return value >= INT32_MIN && value <= INT32_MAX;
+    return magnitude <= (negative ? (uint64_t)INT32_MAX + 1 : (uint64_t)INT32_MAX);
   case TYPE_KIND_I64:
-    return value >= INT64_MIN && value <= INT64_MAX;
+    return magnitude <= (negative ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX);
 
   case TYPE_KIND_BOOL:
-    return value == 0 || value == 1;
+    return !negative && magnitude <= 1;
 
   case TYPE_KIND_F32:
   case TYPE_KIND_F64:

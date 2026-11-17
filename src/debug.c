@@ -49,7 +49,9 @@ void debug_print_ast_expr(Arena *arena, AstExpr *expr) {
   case AST_EXPR_LITERAL:
     switch (expr->expr_literal.kind) {
     case AST_LITERAL_INT:
-      printf("%ld", expr->expr_literal.int_value);
+      printf("%s%lu",
+             expr->expr_literal.int_value.negative ? "-" : "",
+             (unsigned long)expr->expr_literal.int_value.magnitude);
       return;
     case AST_LITERAL_FLOAT:
       printf("%f", expr->expr_literal.float_value);

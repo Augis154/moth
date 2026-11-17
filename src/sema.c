@@ -290,8 +290,8 @@ static void sema_set_expr_type(SemaContext *ctx, const AstExpr *expr, Type *type
 
 // Constant folding
 
-// Whether `expr` is an integer literal; its value is stored in `value`.
-static bool sema_int_literal(const AstExpr *expr, int64_t *value) {
+// Whether `expr` is an integer or character literal; its sign and magnitude are stored in `negative` and `magnitude`.
+static bool sema_int_literal_parts(const AstExpr *expr, bool *negative, uint64_t *magnitude) {
   if (expr->kind != AST_EXPR_LITERAL) {
     return false;
   }
@@ -300,10 +300,12 @@ static bool sema_int_literal(const AstExpr *expr, int64_t *value) {
 
   switch (literal_expr->kind) {
   case AST_LITERAL_INT:
-    *value = literal_expr->int_value;
+    *negative = literal_expr->int_value.negative;
+    *magnitude = literal_expr->int_value.magnitude;
     return true;
   case AST_LITERAL_CHAR:
-    *value = literal_expr->code_point;
+    *negative = false;
+    *magnitude = literal_expr->code_point;
     return true;
 
   case AST_LITERAL_FLOAT:
@@ -315,7 +317,27 @@ static bool sema_int_literal(const AstExpr *expr, int64_t *value) {
     return false;
   }
 
-  UNREACHABLE("sema_int_literal: unhandled literal kind");
+  UNREACHABLE("sema_int_literal_parts: unhandled literal kind");
+}
+
+// Whether `expr` is an integer or character literal that fits an int64; its value is stored in `value`.
+static bool sema_int_literal(const AstExpr *expr, int64_t *value) {
+  bool negative;
+  uint64_t magnitude;
+
+  if (!sema_int_literal_parts(expr, &negative, &magnitude)) return false;
+  if (magnitude > (negative ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX)) return false;
+
+  *value = (int64_t)(negative ? 0 - magnitude : magnitude);
+  return true;
+}
+
+// An integer literal of `value`.
+static AstExprLiteral sema_make_int_literal(int64_t value) {
+  bool negative = value < 0;
+  uint64_t magnitude = negative ? 0 - (uint64_t)value : (uint64_t)value;
+
+  return (AstExprLiteral){.kind = AST_LITERAL_INT, .int_value = {.magnitude = magnitude, .negative = negative}};
 }
 
 // Computes `op operand`; false when the result is not representable.
@@ -382,13 +404,26 @@ static bool sema_fold_binary(BinaryOp op, int64_t left, int64_t right, int64_t *
 
 // Replaces an untyped integer expression whose operands are integer literals by the literal of its value.
 static void sema_fold_constant(AstExpr *expr) {
+  AstExprLiteral literal;
   int64_t value;
 
   switch (expr->kind) {
   case AST_EXPR_UNARY: {
+    const AstExpr *operand_expr = expr->expr_unary.operand;
+
+    // Negating an integer literal flips its sign, so it also covers 2^63, which no int64 holds
+    if (expr->expr_unary.op == UNOP_NEGATE && operand_expr->kind == AST_EXPR_LITERAL &&
+        operand_expr->expr_literal.kind == AST_LITERAL_INT) {
+      literal = operand_expr->expr_literal;
+      literal.int_value.negative = !literal.int_value.negative && literal.int_value.magnitude != 0;
+      break;
+    }
+
     int64_t operand;
-    if (!sema_int_literal(expr->expr_unary.operand, &operand)) return;
+    if (!sema_int_literal(operand_expr, &operand)) return;
     if (!sema_fold_unary(expr->expr_unary.op, operand, &value)) return;
+
+    literal = sema_make_int_literal(value);
     break;
   }
 
@@ -397,6 +432,8 @@ static void sema_fold_constant(AstExpr *expr) {
     if (!sema_int_literal(expr->expr_binary.left, &left)) return;
     if (!sema_int_literal(expr->expr_binary.right, &right)) return;
     if (!sema_fold_binary(expr->expr_binary.op, left, right, &value)) return;
+
+    literal = sema_make_int_literal(value);
     break;
   }
 
@@ -405,7 +442,7 @@ static void sema_fold_constant(AstExpr *expr) {
   }
 
   expr->kind = AST_EXPR_LITERAL;
-  expr->expr_literal = (AstExprLiteral){.kind = AST_LITERAL_INT, .int_value = value};
+  expr->expr_literal = literal;
 }
 
 // Implicit conversions
@@ -421,16 +458,30 @@ static void sema_concretize(SemaContext *ctx, AstExpr *expr, Type *target) {
 
   switch (expr->kind) {
   case AST_EXPR_LITERAL: {
-    int64_t value;
-    if (type_is_integer(target) && !type_is_internal(target) && sema_int_literal(expr, &value) &&
-        !type_int_fits(target, value)) {
+    bool negative;
+    uint64_t magnitude;
+    if (type_is_integer(target) && !type_is_internal(target) && sema_int_literal_parts(expr, &negative, &magnitude) &&
+        !type_int_fits(target, negative, magnitude)) {
       if (expr->expr_literal.kind != AST_LITERAL_CHAR) {
-        sema_error(ctx, expr->loc, "Value %ld does not fit in '%s'", value, type_display_name(target));
-      } else if (value >= 32 && value < 127) {
-        sema_error(
-          ctx, expr->loc, "Character '%c' (%ld) does not fit in '%s'", (char)value, value, type_display_name(target));
+        sema_error(ctx,
+                   expr->loc,
+                   "Value %s%lu does not fit in '%s'",
+                   negative ? "-" : "",
+                   (unsigned long)magnitude,
+                   type_display_name(target));
+      } else if (magnitude >= 32 && magnitude < 127) {
+        sema_error(ctx,
+                   expr->loc,
+                   "Character '%c' (%lu) does not fit in '%s'",
+                   (char)magnitude,
+                   (unsigned long)magnitude,
+                   type_display_name(target));
       } else {
-        sema_error(ctx, expr->loc, "Character U+%04lX does not fit in '%s'", value, type_display_name(target));
+        sema_error(ctx,
+                   expr->loc,
+                   "Character U+%04lX does not fit in '%s'",
+                   (unsigned long)magnitude,
+                   type_display_name(target));
       }
     }
     break;
@@ -571,8 +622,8 @@ static int64_t sema_array_literal_length(SemaContext *ctx, AstExpr *expr, bool r
       return -1;
     }
 
-    int64_t length = length_expr->expr_literal.int_value;
-    if (length <= 0 || length > UINT32_MAX) {
+    int64_t length;
+    if (!sema_int_literal(length_expr, &length) || length <= 0 || length > UINT32_MAX) {
       sema_literal_error(ctx, report, length_expr->loc, "Array length must be between 1 and 2^32 - 1");
       return -1;
     }
@@ -594,8 +645,7 @@ static int64_t sema_array_literal_length(SemaContext *ctx, AstExpr *expr, bool r
         return -1;
       }
 
-      next_index = index_expr->expr_literal.int_value;
-      if (next_index < 0 || next_index >= UINT32_MAX) {
+      if (!sema_int_literal(index_expr, &next_index) || next_index < 0 || next_index >= UINT32_MAX) {
         sema_literal_error(ctx, report, index_expr->loc, "Array index is out of range");
         return -1;
       }
@@ -1041,8 +1091,7 @@ static Type *sema_expr_member(SemaContext *ctx, AstExpr *expr) {
     int64_t length = object_type->array.length;
 
     expr->kind = AST_EXPR_LITERAL;
-    expr->expr_literal.kind = AST_LITERAL_INT;
-    expr->expr_literal.int_value = length;
+    expr->expr_literal = sema_make_int_literal(length);
 
     return type_i64;
   }
@@ -2272,9 +2321,13 @@ static Type *sema_type_array(SemaContext *ctx, AstType *ast_type, bool need_comp
     return type_error;
   }
 
-  int64_t length = array_ast_type->length_expr->expr_literal.int_value;
+  bool negative;
+  uint64_t length;
+  if (!sema_int_literal_parts(array_ast_type->length_expr, &negative, &length)) {
+    UNREACHABLE("sema_type_array: an integer literal has an integer value");
+  }
 
-  if (length == 0) {
+  if (negative || length == 0) {
     sema_error(ctx, array_ast_type->length_expr->loc, "Array length must be greater than zero");
     return type_error;
   }

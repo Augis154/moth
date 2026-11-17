@@ -559,7 +559,8 @@ static IrReg emit_expr_literal_string(IrGenContext *ctx, AstExpr *expr) {
 static int64_t literal_int_value(const AstExprLiteral *literal_expr) {
   switch (literal_expr->kind) {
   case AST_LITERAL_INT:
-    return literal_expr->int_value;
+    return (int64_t)(literal_expr->int_value.negative ? 0 - literal_expr->int_value.magnitude
+                                                      : literal_expr->int_value.magnitude);
   case AST_LITERAL_CHAR:
     return literal_expr->code_point;
   case AST_LITERAL_TRUE:
@@ -578,6 +579,18 @@ static int64_t literal_int_value(const AstExprLiteral *literal_expr) {
   UNREACHABLE("literal_int_value: unhandled literal kind");
 }
 
+// The value of a float literal, or of an integer literal that takes a float type.
+static double literal_float_value(const AstExprLiteral *literal_expr) {
+  if (literal_expr->kind == AST_LITERAL_FLOAT) return literal_expr->float_value;
+
+  if (literal_expr->kind == AST_LITERAL_INT) {
+    double magnitude = (double)literal_expr->int_value.magnitude;
+    return literal_expr->int_value.negative ? -magnitude : magnitude;
+  }
+
+  return (double)literal_int_value(literal_expr);
+}
+
 // Emits a literal: a number, character or bool is a constant in a register; a string is a slice of data.
 static IrReg emit_expr_literal(IrGenContext *ctx, AstExpr *expr) {
   assert(expr && "emit_expr_literal: expr is NULL");
@@ -592,9 +605,7 @@ static IrReg emit_expr_literal(IrGenContext *ctx, AstExpr *expr) {
   IrReg result = new_reg_for(ctx, type);
 
   if (ir_type_is_float(get_ir_type(ctx, type))) {
-    double float_value =
-      literal_expr->kind == AST_LITERAL_FLOAT ? literal_expr->float_value : (double)literal_int_value(literal_expr);
-    emit_ir_instr(ctx, IR_OP_LOAD_FLOAT, .res = result, .float_lit = float_value);
+    emit_ir_instr(ctx, IR_OP_LOAD_FLOAT, .res = result, .float_lit = literal_float_value(literal_expr));
   } else {
     emit_ir_instr(ctx, IR_OP_LOAD_INT, .res = result, .int_lit = literal_int_value(literal_expr));
   }
