@@ -225,6 +225,11 @@ static bool is_lvalue(const SemaContext *ctx, const AstExpr *expr) {
   }
 }
 
+// Whether `expr` is an array or a struct literal: a fresh value that is never a place.
+static bool is_composite_literal(const AstExpr *expr) {
+  return expr->kind == AST_EXPR_ARRAY_LITERAL || expr->kind == AST_EXPR_STRUCT_LITERAL;
+}
+
 // Names the kind of expression for diagnostics, e.g. "a literal".
 static const char *describe_expr(const AstExpr *expr) {
   switch (expr->kind) {
@@ -235,6 +240,8 @@ static const char *describe_expr(const AstExpr *expr) {
 
   case AST_EXPR_ARRAY_LITERAL:
     return "an array literal";
+  case AST_EXPR_STRUCT_LITERAL:
+    return "a struct literal";
 
   case AST_EXPR_ADDR_OF:
     return "an address-of expression";
@@ -738,9 +745,112 @@ static Type *sema_expr_array_literal(SemaContext *ctx, AstExpr *expr, Type *hint
   return hint ? hint : sema_array_of(ctx, expr->loc, elem_type, length);
 }
 
+// Reports initialiser `index` of a struct literal if an earlier one names the same field; returns whether it does.
+static bool sema_is_duplicate_literal_field(SemaContext *ctx, const AstExprStructLiteral *struct_literal_expr,
+                                            Type *struct_type, uint32_t index) {
+  const AstExprStructLiteralField *field = &struct_literal_expr->fields[index];
+
+  for (uint32_t i = 0; i < index; i++) {
+    if (struct_literal_expr->fields[i].name != field->name) continue;
+
+    sema_error(ctx,
+               field->loc,
+               "Duplicate field '%s' in struct literal for '%s'. Previous initialiser at line %u",
+               field->name,
+               type_display_name(struct_type),
+               struct_literal_expr->fields[i].loc.line);
+    return true;
+  }
+
+  return false;
+}
+
+// Types `Name.{ field: value, ... }`: each value converts to its field's type and an omitted field is zero.
+static Type *sema_expr_struct_literal(SemaContext *ctx, AstExpr *expr, Type *hint) {
+  AstExprStructLiteral *struct_literal_expr = &expr->expr_struct_literal;
+
+  uint32_t field_count = struct_literal_expr->field_count;
+
+  if (hint == type_error) {
+    for (uint32_t i = 0; i < field_count; i++) {
+      sema_expr(ctx, struct_literal_expr->fields[i].value);
+    }
+    return type_error;
+  }
+
+  AstType *ast_type = struct_literal_expr->type;
+  Type *struct_type = hint;
+
+  if (ast_type) {
+    struct_type = sema_type(ctx, ast_type);
+
+    if (struct_type == type_error) {
+      return type_error;
+    }
+
+    if (!type_is_struct(struct_type)) {
+      sema_error(ctx, ast_type->loc, "Type '%s' is not a struct", type_display_name(struct_type));
+      return type_error;
+    }
+  } else {
+    if (!hint) {
+      sema_error(ctx, expr->loc, "Cannot type a struct literal without a struct name or a type hint");
+      return type_error;
+    }
+
+    if (!type_is_struct(struct_type)) {
+      sema_error(ctx, expr->loc, "Cannot convert a struct literal to '%s'", type_display_name(struct_type));
+      return type_error;
+    }
+  }
+
+  for (uint32_t i = 0; i < field_count; i++) {
+    AstExprStructLiteralField *field = &struct_literal_expr->fields[i];
+
+    TypeField type_field;
+
+    if (!type_find_field(&ctx->comp_unit->arena, struct_type, field->name, &type_field)) {
+      sema_error(ctx, field->loc, "Struct '%s' has no field '%s'", type_display_name(struct_type), field->name);
+      continue;
+    }
+
+    if (sema_is_duplicate_literal_field(ctx, struct_literal_expr, struct_type, i)) {
+      continue;
+    }
+
+    Type *field_type = sema_expr_hint(ctx, field->value, type_field.type);
+
+    if (field_type == type_error) {
+      continue;
+    }
+
+    if (!type_can_widen_to(field_type, type_field.type)) {
+      sema_error(ctx,
+                 field->loc,
+                 "Field '%s' of struct '%s' expects type '%s', but got '%s'",
+                 field->name,
+                 type_display_name(struct_type),
+                 type_display_name(type_field.type),
+                 type_display_name(field_type));
+      continue;
+    }
+
+    sema_coerce(ctx, &field->value, type_field.type);
+    field->offset = type_field.offset;
+  }
+
+  return struct_type;
+}
+
 // Types `&x`: an lvalue operand, giving a pointer to it. A variable whose address is taken lives in memory.
 static Type *sema_expr_addr_of(SemaContext *ctx, AstExpr *expr) {
   AstExpr *operand = expr->expr_addr_of.operand;
+
+  if (is_composite_literal(operand)) {
+    sema_error(ctx, expr->loc, "Cannot take the address of %s", describe_expr(operand));
+    return type_error;
+  }
+
   Type *operand_type = sema_expr(ctx, operand);
 
   if (operand_type != type_error && !is_lvalue(ctx, operand)) {
@@ -1457,6 +1567,12 @@ static Type *sema_expr_assign(SemaContext *ctx, AstExpr *expr) {
 
   AstExpr *target = assign_expr->target;
 
+  if (is_composite_literal(target)) {
+    sema_expr(ctx, assign_expr->value);
+    sema_error(ctx, expr->loc, "Invalid assignment target: %s cannot be assigned to", describe_expr(target));
+    return type_error;
+  }
+
   if (target->kind == AST_EXPR_IDENTIFIER) {
     Symbol *sym = scope_lookup(ctx, target->expr_identifier.name);
 
@@ -1519,6 +1635,10 @@ Type *sema_expr(SemaContext *ctx, AstExpr *expr) {
 
   case AST_EXPR_ARRAY_LITERAL:
     result_type = sema_expr_array_literal(ctx, expr, NULL);
+    break;
+
+  case AST_EXPR_STRUCT_LITERAL:
+    result_type = sema_expr_struct_literal(ctx, expr, NULL);
     break;
 
   case AST_EXPR_ADDR_OF:
@@ -1585,14 +1705,25 @@ Type *sema_expr(SemaContext *ctx, AstExpr *expr) {
 Type *sema_expr_hint(SemaContext *ctx, AstExpr *expr, Type *hint) {
   assert(expr && "sema_expr_hint called without an expression");
 
-  if (expr->kind != AST_EXPR_ARRAY_LITERAL) {
+  Type *result_type = NULL;
+
+  // Only the literals use the hint: the type of an array or a struct literal comes from the context
+  switch (expr->kind) {
+  case AST_EXPR_ARRAY_LITERAL:
+    result_type = sema_expr_array_literal(ctx, expr, hint);
+    break;
+
+  case AST_EXPR_STRUCT_LITERAL:
+    result_type = sema_expr_struct_literal(ctx, expr, hint);
+    break;
+
+  default:
     return sema_expr(ctx, expr);
   }
 
-  Type *type = sema_expr_array_literal(ctx, expr, hint);
-  sema_set_expr_type(ctx, expr, type);
+  sema_set_expr_type(ctx, expr, result_type);
 
-  return type;
+  return result_type;
 }
 
 // Statement semantic analysis functions

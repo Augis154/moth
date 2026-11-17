@@ -282,6 +282,7 @@ Token lexer_get_token(Lexer *lex) {
   // Tokens that lookahead
   case '.':
     if (match(lex, '*')) return new_token(lex, TOKEN_DEREF);
+    if (match(lex, '{')) return new_token(lex, TOKEN_DOT_LBRACE);
     if (!match(lex, '.')) return new_token(lex, TOKEN_DOT);
     if (!match(lex, '.')) return new_token(lex, TOKEN_DOTDOT);
     return new_token(lex, TOKEN_ELLIPSIS);

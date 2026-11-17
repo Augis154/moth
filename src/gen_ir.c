@@ -651,6 +651,34 @@ static IrReg emit_expr_array_literal(IrGenContext *ctx, AstExpr *expr) {
   return array_addr;
 }
 
+// Builds a struct literal in a new stack slot, zeroed first if a field is left out, and yields the slot's address.
+static IrReg emit_expr_struct_literal(IrGenContext *ctx, AstExpr *expr) {
+  AstExprStructLiteral *struct_literal_expr = &expr->expr_struct_literal;
+
+  Type *struct_type = expr_type(ctx, expr);
+
+  IrReg struct_addr = queue_entry_alloc(ctx, struct_type);
+
+  uint32_t field_count = struct_literal_expr->field_count;
+
+  if (field_count < struct_type->structure.field_count) {
+    emit_zero(ctx, struct_addr, struct_type);
+  }
+
+  for (uint32_t i = 0; i < field_count; i++) {
+    AstExprStructLiteralField *field = &struct_literal_expr->fields[i];
+    Type *field_type = expr_type(ctx, field->value);
+    IrReg value = emit_expr(ctx, field->value);
+
+    int64_t byte_offset = (int64_t)field->offset;
+    IrReg field_addr = emit_addr_offset(ctx, struct_addr, byte_offset);
+
+    emit_store(ctx, value, field_addr, field_type);
+  }
+
+  return struct_addr;
+}
+
 // The address of `target[index]`.
 static IrReg emit_array_access(IrGenContext *ctx, AstExpr *target_expr, AstExpr *index_expr) {
   IrReg target = emit_expr(ctx, target_expr);
@@ -983,6 +1011,9 @@ static IrReg emit_expr(IrGenContext *ctx, AstExpr *expr) {
 
   case AST_EXPR_ARRAY_LITERAL:
     return emit_expr_array_literal(ctx, expr);
+
+  case AST_EXPR_STRUCT_LITERAL:
+    return emit_expr_struct_literal(ctx, expr);
 
   case AST_EXPR_ADDR_OF:
     return emit_expr_addr_of(ctx, expr);

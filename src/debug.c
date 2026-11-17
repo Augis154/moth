@@ -113,6 +113,19 @@ void debug_print_ast_expr(Arena *arena, AstExpr *expr) {
     printf(")");
     return;
 
+  case AST_EXPR_STRUCT_LITERAL:
+    // The parser only builds a named type for a struct literal
+    printf("(struct-literal %s",
+           expr->expr_struct_literal.type ? expr->expr_struct_literal.type->type_named.name : ".");
+    for (uint32_t i = 0; i < expr->expr_struct_literal.field_count; i++) {
+      AstExprStructLiteralField *field = &expr->expr_struct_literal.fields[i];
+      printf(" (%s ", field->name);
+      debug_print_ast_expr(arena, field->value);
+      printf(")");
+    }
+    printf(")");
+    return;
+
   case AST_EXPR_ADDR_OF:
     printf("(& ");
     debug_print_ast_expr(arena, expr->expr_addr_of.operand);

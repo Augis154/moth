@@ -56,6 +56,7 @@ typedef enum {
 
   // Composite literals
   AST_EXPR_ARRAY_LITERAL,
+  AST_EXPR_STRUCT_LITERAL,
 
   // Access: address-of, dereference, subscript and call
   AST_EXPR_ADDR_OF,
@@ -134,6 +135,19 @@ typedef struct {
 } AstExprArrayLiteral;
 
 typedef struct {
+  const char *name;
+  AstExpr *value;
+  uint32_t offset; // Filled in by sema
+  SourceLoc loc;
+} AstExprStructLiteralField;
+
+typedef struct {
+  AstType *type; // NULL when the struct type comes from context
+  AstExprStructLiteralField *fields;
+  uint32_t field_count;
+} AstExprStructLiteral;
+
+typedef struct {
   AstExpr *operand;
 } AstExprAddrOf;
 
@@ -202,6 +216,7 @@ struct AstExpr_ {
     AstExprIdentifier expr_identifier;
 
     AstExprArrayLiteral expr_array_literal;
+    AstExprStructLiteral expr_struct_literal;
 
     AstExprAddrOf expr_addr_of;
     AstExprDeref expr_deref;

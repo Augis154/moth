@@ -28,7 +28,7 @@ typedef enum {
   PREC_FACTOR,     // * /
   PREC_CAST,       // as
   PREC_PREFIX,     // ! ~ - &
-  PREC_POSTFIX,    // . () []
+  PREC_POSTFIX,    // . .* .{ () []
 } Precedence;
 
 typedef AstExpr *(*ParsePrefixFn)(Parser *parser);
@@ -702,6 +702,87 @@ static AstExpr *parse_expr_array_literal(Parser *parser) {
   da_free(elements);
 
   return expr;
+}
+
+// IDENT ':' expression  -- one initialiser of a struct literal.
+static bool parse_struct_literal_field(Parser *parser, AstExprStructLiteralField *field) {
+  SourceLoc field_loc = parser->current.loc;
+
+  if (!match(parser, TOKEN_IDENT)) {
+    error_at(parser, parser->current, "Expected struct literal field name.");
+    return false;
+  }
+
+  const char *field_name = parse_identifier_name(parser, parser->previous);
+  if (!field_name) return false;
+
+  if (!consume(parser, TOKEN_COLON, "Expected ':' after struct literal field name.")) return false;
+
+  AstExpr *value = parse_expr(parser);
+  if (!value) return false;
+
+  *field = (AstExprStructLiteralField){
+    .name = field_name,
+    .value = value,
+    .loc = field_loc,
+  };
+
+  return true;
+}
+
+// [ field { ',' field } [ ',' ] ] '}'  -- a struct literal after its '.{', with `ast_type` NULL when the type comes
+// from context.
+static AstExpr *parse_struct_literal(Parser *parser, AstType *ast_type, SourceLoc start_loc) {
+  AstExpr *expr = ast_expr_new(&parser->comp_unit->arena, AST_EXPR_STRUCT_LITERAL, start_loc);
+  expr->expr_struct_literal.type = ast_type;
+
+  AstExprStructLiteralField *fields = NULL;
+
+  while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+    AstExprStructLiteralField field;
+
+    if (!parse_struct_literal_field(parser, &field)) {
+      da_free(fields);
+      return NULL;
+    }
+
+    da_append(fields, field);
+
+    if (!match(parser, TOKEN_COMMA)) break;
+  }
+
+  if (!consume(parser, TOKEN_RBRACE, "Expected '}' after struct literal fields.")) {
+    da_free(fields);
+    return NULL;
+  }
+
+  uint32_t field_count = da_len(fields);
+  expr->expr_struct_literal.fields =
+    arena_copy_array(&parser->comp_unit->arena, fields, field_count, sizeof(AstExprStructLiteralField));
+  expr->expr_struct_literal.field_count = field_count;
+  da_free(fields);
+
+  return expr;
+}
+
+// IDENT '.{' ... '}'  -- the '.{' is already consumed.
+static AstExpr *parse_expr_struct_literal_named(Parser *parser, AstExpr *left) {
+  if (!left) return NULL;
+
+  if (left->kind != AST_EXPR_IDENTIFIER) {
+    error_at(parser, parser->previous, "Expected struct type name before '.{'.");
+    return NULL;
+  }
+
+  AstType *ast_type = ast_type_new(&parser->comp_unit->arena, AST_TYPE_NAMED, left->loc);
+  ast_type->type_named.name = left->expr_identifier.name;
+
+  return parse_struct_literal(parser, ast_type, left->loc);
+}
+
+// '.{' ... '}'  -- the '.{' is already consumed; the struct type comes from context.
+static AstExpr *parse_expr_struct_literal_inferred(Parser *parser) {
+  return parse_struct_literal(parser, NULL, parser->previous.loc);
 }
 
 // '(' expression ')'  -- the '(' is already consumed.
@@ -1511,4 +1592,5 @@ static const ParseRule rules[TOKEN_COUNT] = {
   [TOKEN_LBRACKET] = {PREC_POSTFIX, parse_expr_array_literal, parse_expr_subscript},
   [TOKEN_DOT] = {PREC_POSTFIX, NULL, parse_expr_member},
   [TOKEN_DEREF] = {PREC_POSTFIX, NULL, parse_expr_deref},
+  [TOKEN_DOT_LBRACE] = {PREC_POSTFIX, parse_expr_struct_literal_inferred, parse_expr_struct_literal_named},
 };

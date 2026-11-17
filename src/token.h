@@ -40,20 +40,21 @@
   X(TOKEN_TILDE, "~")       \
   X(TOKEN_DEREF, ".*")
 
-#define TOKENS_SYMBOLS(X)  \
-  X(TOKEN_LPAREN, "(")     \
-  X(TOKEN_RPAREN, ")")     \
-  X(TOKEN_LBRACE, "{")     \
-  X(TOKEN_RBRACE, "}")     \
-  X(TOKEN_LBRACKET, "[")   \
-  X(TOKEN_RBRACKET, "]")   \
-                           \
-  X(TOKEN_DOT, ".")        \
-  X(TOKEN_COMMA, ",")      \
-  X(TOKEN_COLON, ":")      \
-  X(TOKEN_SEMICOLON, ";")  \
-                           \
-  X(TOKEN_DOTDOT, "..")    \
+#define TOKENS_SYMBOLS(X)   \
+  X(TOKEN_LPAREN, "(")      \
+  X(TOKEN_RPAREN, ")")      \
+  X(TOKEN_LBRACE, "{")      \
+  X(TOKEN_RBRACE, "}")      \
+  X(TOKEN_LBRACKET, "[")    \
+  X(TOKEN_RBRACKET, "]")    \
+                            \
+  X(TOKEN_DOT, ".")         \
+  X(TOKEN_COMMA, ",")       \
+  X(TOKEN_COLON, ":")       \
+  X(TOKEN_SEMICOLON, ";")   \
+                            \
+  X(TOKEN_DOTDOT, "..")     \
+  X(TOKEN_DOT_LBRACE, ".{") \
   X(TOKEN_ELLIPSIS, "...")
 
 #define TOKENS_LITERALS(X)     \
