@@ -308,9 +308,24 @@ struct AstStmt_ {
 
 typedef enum {
   AST_DECL_INVALID,
-  AST_DECL_FUNCTION,
   AST_DECL_STRUCT,
+  AST_DECL_FUNCTION,
 } AstDeclKind;
+
+typedef struct {
+  const char *name;
+  AstType *type;
+  SourceLoc loc;
+} AstStructField;
+
+typedef struct {
+  const char *name;
+
+  AstStructField *fields;
+  uint32_t field_count;
+
+  Symbol *symbol; // Filled in by sema
+} AstDeclStruct;
 
 typedef struct {
   SourceLoc loc;
@@ -334,29 +349,14 @@ typedef struct {
   Symbol *symbol; // Filled in by sema
 } AstDeclFunction;
 
-typedef struct {
-  const char *name;
-  AstType *type;
-  SourceLoc loc;
-} AstStructField;
-
-typedef struct {
-  const char *name;
-
-  AstStructField *fields;
-  uint32_t field_count;
-
-  Symbol *symbol; // Filled in by sema
-} AstDeclStruct;
-
 struct AstDecl_ {
   AstDeclKind kind;
   uint32_t id;
   SourceLoc loc;
 
   union {
-    AstDeclFunction decl_function;
     AstDeclStruct decl_struct;
+    AstDeclFunction decl_function;
   };
 };
 

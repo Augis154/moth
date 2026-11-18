@@ -311,6 +311,14 @@ void debug_print_ast_decl(Arena *arena, AstDecl *decl) {
   }
 
   switch (decl->kind) {
+  case AST_DECL_STRUCT:
+    printf("Struct Declaration: %s\n", decl->decl_struct.name);
+    for (uint32_t i = 0; i < decl->decl_struct.field_count; i++) {
+      print_indent(1);
+      printf("Field: %s\n", decl->decl_struct.fields[i].name);
+    }
+    return;
+
   case AST_DECL_FUNCTION:
     printf("%s%sFunction Declaration: %s\n",
            decl->decl_function.is_extern ? "Extern " : "",
@@ -321,14 +329,6 @@ void debug_print_ast_decl(Arena *arena, AstDecl *decl) {
     print_indent(1);
     printf("Body:\n");
     debug_print_ast_stmt(arena, decl->decl_function.body);
-    return;
-
-  case AST_DECL_STRUCT:
-    printf("Struct Declaration: %s\n", decl->decl_struct.name);
-    for (uint32_t i = 0; i < decl->decl_struct.field_count; i++) {
-      print_indent(1);
-      printf("Field: %s\n", decl->decl_struct.fields[i].name);
-    }
     return;
 
   case AST_DECL_INVALID:

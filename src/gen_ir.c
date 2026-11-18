@@ -70,17 +70,9 @@ static IrAggId get_array_agg_id(IrGenContext *ctx, Type *type) {
   return get_agg_id(ctx, type->alignment, &field, 1);
 }
 
-// The id of the aggregate with the layout of slice `type`, `{ptr, len}`; all slices share it.
-static IrAggId get_slice_agg_id(IrGenContext *ctx, Type *type) {
-  assert(type_is_slice(type) && "get_slice_agg_id: type is not a slice");
-
-  IrAggField fields[] = {{.type = IR_PTR, .count = 1}, {.type = IR_I64, .count = 1}};
-  return get_agg_id(ctx, type->alignment, fields, 2);
-}
-
-// The id of the aggregate with the layout of struct `type`: its fields, in declaration order.
-static IrAggId get_struct_agg_id(IrGenContext *ctx, Type *type) {
-  assert(type_is_struct(type) && "get_struct_agg_id: type is not a struct");
+// The id of the aggregate with the layout of `type`, a struct or a slice: its fields, in order.
+static IrAggId get_fields_agg_id(IrGenContext *ctx, Type *type) {
+  assert(type_has_fields(type) && "get_fields_agg_id: type has no fields");
 
   IrAggField *fields = NULL;
 
@@ -159,9 +151,8 @@ static IrType get_ir_type(IrGenContext *ctx, Type *type) {
   case TYPE_KIND_ARRAY:
     return IR_AGG(get_array_agg_id(ctx, type));
   case TYPE_KIND_SLICE:
-    return IR_AGG(get_slice_agg_id(ctx, type));
   case TYPE_KIND_STRUCT:
-    return IR_AGG(get_struct_agg_id(ctx, type));
+    return IR_AGG(get_fields_agg_id(ctx, type));
 
   case TYPE_KIND_ERROR:
   case TYPE_KIND_VOID:
@@ -382,7 +373,8 @@ static IrReg emit_slice_value(IrGenContext *ctx, Type *slice_type, IrReg ptr, Ir
 
   emit_ir_instr(ctx, IR_OP_STORE, .arg1 = ptr, .arg2 = slice_addr);
 
-  IrReg len_addr = emit_addr_offset(ctx, slice_addr, SLICE_LEN_OFFSET);
+  uint32_t slice_len_offset = SLICE_LEN_FIELD(slice_type).offset;
+  IrReg len_addr = emit_addr_offset(ctx, slice_addr, slice_len_offset);
   emit_ir_instr(ctx, IR_OP_STORE, .arg1 = len, .arg2 = len_addr);
 
   return slice_addr;
@@ -698,7 +690,8 @@ static IrReg emit_array_access(IrGenContext *ctx, AstExpr *target_expr, AstExpr 
   Type *target_type = expr_type(ctx, target_expr);
 
   if (type_is_slice(target_type)) {
-    target = emit_field_load(ctx, target, SLICE_PTR_OFFSET, type_void_ptr);
+    uint32_t slice_ptr_offset = SLICE_PTR_FIELD(target_type).offset;
+    target = emit_field_load(ctx, target, slice_ptr_offset, type_void_ptr);
   }
 
   return emit_elem_addr(ctx, target, index, type_elem(target_type)->size);
@@ -772,7 +765,12 @@ static IrReg emit_expr_slice(IrGenContext *ctx, AstExpr *expr) {
   bool is_array = type_is_array(target_type);
 
   IrReg target = emit_expr(ctx, slice_expr->target);
-  IrReg data = is_array ? target : emit_field_load(ctx, target, SLICE_PTR_OFFSET, type_void_ptr);
+  IrReg data = target;
+
+  if (type_is_slice(target_type)) {
+    uint32_t slice_ptr_offset = SLICE_PTR_FIELD(target_type).offset;
+    data = emit_field_load(ctx, target, slice_ptr_offset, type_void_ptr);
+  }
 
   IrReg start = slice_expr->start ? emit_expr(ctx, slice_expr->start) : emit_int_const(ctx, 0, IR_I64);
 
@@ -782,7 +780,8 @@ static IrReg emit_expr_slice(IrGenContext *ctx, AstExpr *expr) {
   } else if (is_array) {
     end = emit_int_const(ctx, target_type->array.length, IR_I64);
   } else {
-    end = emit_field_load(ctx, target, SLICE_LEN_OFFSET, type_i64);
+    uint32_t slice_len_offset = SLICE_LEN_FIELD(target_type).offset;
+    end = emit_field_load(ctx, target, slice_len_offset, type_i64);
   }
 
   IrReg base = emit_elem_addr(ctx, data, start, type_elem(slice_type)->size);
@@ -1322,11 +1321,11 @@ static void emit_decl(IrGenContext *ctx, AstDecl *decl) {
   assert(decl && "emit_decl: decl is NULL");
 
   switch (decl->kind) {
-  case AST_DECL_FUNCTION:
-    return emit_decl_function(ctx, decl);
-
   case AST_DECL_STRUCT:
     return;
+
+  case AST_DECL_FUNCTION:
+    return emit_decl_function(ctx, decl);
 
   case AST_DECL_INVALID:
     UNREACHABLE("emit_decl: AST_DECL_INVALID reached IR generation");

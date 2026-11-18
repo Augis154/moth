@@ -1343,6 +1343,61 @@ static bool parse_typed_name(Parser *parser, const char *what, const char **name
   return *ast_type != NULL;
 }
 
+// 'struct' IDENT '{' [ field { ',' field } [ ',' ] ] '}'  where field := IDENT ':' type
+static AstDecl *parse_decl_struct(Parser *parser) {
+  SourceLoc start_loc = parser->current.loc;
+
+  expect(parser, TOKEN_STRUCT);
+  consume(parser, TOKEN_IDENT, "Expected struct name after 'struct'.");
+
+  const char *struct_name = parse_identifier_name(parser, parser->previous);
+  if (!struct_name) return NULL;
+
+  if (!consume(parser, TOKEN_LBRACE, "Expected '{' after struct name.")) return NULL;
+
+  AstStructField *fields = NULL;
+  bool fields_ok = true;
+
+  // A bad field is skipped, so every field can report its own error
+  while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+    SourceLoc field_loc = parser->current.loc;
+
+    const char *field_name;
+    AstType *field_ast_type;
+    bool field_ok = parse_typed_name(parser, "field", &field_name, &field_ast_type);
+
+    if (list_element_ok(parser, field_ok)) {
+      AstStructField field = {
+        .name = field_name,
+        .type = field_ast_type,
+        .loc = field_loc,
+      };
+      da_append(fields, field);
+    } else {
+      fields_ok = false;
+    }
+
+    if (!match(parser, TOKEN_COMMA)) break;
+  }
+
+  if (!list_close(parser, TOKEN_RBRACE, fields_ok, "Expected '}' after struct declaration.")) {
+    da_free(fields);
+    return NULL;
+  }
+
+  uint32_t field_count = da_len(fields);
+  AstStructField *field_array =
+    arena_copy_array(&parser->comp_unit->arena, fields, field_count, sizeof(AstStructField));
+  da_free(fields);
+
+  AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_STRUCT, start_loc);
+  decl->decl_struct.name = struct_name;
+  decl->decl_struct.fields = field_array;
+  decl->decl_struct.field_count = field_count;
+
+  return decl;
+}
+
 // [ 'extern' ] 'fn' IDENT '(' [ param { ',' param } [ ',' '...' | ',' ] ] ')' [ ':' type ] ( block | ';' )
 // The ';' form and the '...' parameter are only for 'extern', whose keyword parse_decl_extern has consumed.
 static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
@@ -1437,61 +1492,6 @@ static AstDecl *parse_decl_function(Parser *parser, bool is_extern) {
   return decl;
 }
 
-// 'struct' IDENT '{' [ field { ',' field } [ ',' ] ] '}'  where field := IDENT ':' type
-static AstDecl *parse_decl_struct(Parser *parser) {
-  SourceLoc start_loc = parser->current.loc;
-
-  expect(parser, TOKEN_STRUCT);
-  consume(parser, TOKEN_IDENT, "Expected struct name after 'struct'.");
-
-  const char *struct_name = parse_identifier_name(parser, parser->previous);
-  if (!struct_name) return NULL;
-
-  if (!consume(parser, TOKEN_LBRACE, "Expected '{' after struct name.")) return NULL;
-
-  AstStructField *fields = NULL;
-  bool fields_ok = true;
-
-  // A bad field is skipped, so every field can report its own error
-  while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
-    SourceLoc field_loc = parser->current.loc;
-
-    const char *field_name;
-    AstType *field_ast_type;
-    bool field_ok = parse_typed_name(parser, "field", &field_name, &field_ast_type);
-
-    if (list_element_ok(parser, field_ok)) {
-      AstStructField field = {
-        .name = field_name,
-        .type = field_ast_type,
-        .loc = field_loc,
-      };
-      da_append(fields, field);
-    } else {
-      fields_ok = false;
-    }
-
-    if (!match(parser, TOKEN_COMMA)) break;
-  }
-
-  if (!list_close(parser, TOKEN_RBRACE, fields_ok, "Expected '}' after struct declaration.")) {
-    da_free(fields);
-    return NULL;
-  }
-
-  uint32_t field_count = da_len(fields);
-  AstStructField *field_array =
-    arena_copy_array(&parser->comp_unit->arena, fields, field_count, sizeof(AstStructField));
-  da_free(fields);
-
-  AstDecl *decl = ast_decl_new(&parser->comp_unit->arena, AST_DECL_STRUCT, start_loc);
-  decl->decl_struct.name = struct_name;
-  decl->decl_struct.fields = field_array;
-  decl->decl_struct.field_count = field_count;
-
-  return decl;
-}
-
 // 'extern' function_declaration  -- a declaration without a body, defined outside this program.
 static AstDecl *parse_decl_extern(Parser *parser) {
   expect(parser, TOKEN_EXTERN);
@@ -1507,14 +1507,14 @@ static AstDecl *parse_decl_extern(Parser *parser) {
   return NULL;
 }
 
-// declaration := function | struct | 'extern' function  -- recovers to the next declaration on anything else.
+// declaration := struct | function | 'extern' function  -- recovers to the next declaration on anything else.
 AstDecl *parse_decl(Parser *parser) {
   switch (parser->current.kind) {
-  case TOKEN_FN:
-    return parse_decl_function(parser, false);
-
   case TOKEN_STRUCT:
     return parse_decl_struct(parser);
+
+  case TOKEN_FN:
+    return parse_decl_function(parser, false);
 
   case TOKEN_EXTERN:
     return parse_decl_extern(parser);

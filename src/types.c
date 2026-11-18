@@ -93,6 +93,10 @@ bool type_is_array_like(Type *type) {
   return type_is_array(type) || type_is_slice(type);
 }
 
+bool type_has_fields(Type *type) {
+  return type_is_struct(type) || type_is_slice(type);
+}
+
 bool type_is_aggregate(Type *type) {
   return type_is_array(type) || type_is_slice(type) || type_is_struct(type);
 }
@@ -220,7 +224,7 @@ bool type_equals(Type *a, Type *b) {
   }
 
   if (type_is_slice(a) && type_is_slice(b)) {
-    return type_equals(a->slice.elem_type, b->slice.elem_type);
+    return type_equals(type_elem(a), type_elem(b));
   }
 
   return false;
@@ -265,7 +269,7 @@ bool type_can_widen_to(Type *from_type, Type *to_type) {
   }
 
   if (type_is_array(from_type) && type_is_slice(to_type)) {
-    return type_equals(from_type->array.elem_type, to_type->slice.elem_type);
+    return type_equals(from_type->array.elem_type, type_elem(to_type));
   }
 
   return false;
@@ -293,12 +297,12 @@ Type *type_common(Type *a, Type *b) {
 
 // Building and deriving types
 
-Type *type_pointer_to(Arena *arena, Type *base_type) {
+Type *type_pointer_to(CompilationUnit *comp_unit, Type *base_type) {
   size_t name_len = strlen(base_type->name) + 2;
-  char *name = arena_alloc(arena, name_len);
+  char *name = arena_alloc(&comp_unit->arena, name_len);
   snprintf(name, name_len, "*%s", base_type->name);
 
-  Type *ptr_type = arena_alloc(arena, sizeof(Type));
+  Type *ptr_type = arena_alloc(&comp_unit->arena, sizeof(Type));
   *ptr_type = (Type){
     .kind = TYPE_KIND_POINTER,
     .name = name,
@@ -310,12 +314,12 @@ Type *type_pointer_to(Arena *arena, Type *base_type) {
   return ptr_type;
 }
 
-Type *type_array_of(Arena *arena, Type *elem_type, uint32_t length) {
+Type *type_array_of(CompilationUnit *comp_unit, Type *elem_type, uint32_t length) {
   size_t name_len = strlen(elem_type->name) + 16;
-  char *name = arena_alloc(arena, name_len);
+  char *name = arena_alloc(&comp_unit->arena, name_len);
   snprintf(name, name_len, "[%u]%s", length, elem_type->name);
 
-  Type *array_type = arena_alloc(arena, sizeof(Type));
+  Type *array_type = arena_alloc(&comp_unit->arena, sizeof(Type));
   *array_type = (Type){
     .kind = TYPE_KIND_ARRAY,
     .name = name,
@@ -327,27 +331,40 @@ Type *type_array_of(Arena *arena, Type *elem_type, uint32_t length) {
   return array_type;
 }
 
-Type *type_slice_of(Arena *arena, Type *elem_type) {
+typedef struct {
+  Type type;
+  TypeField fields[2];
+} SliceType;
+
+Type *type_slice_of(CompilationUnit *comp_unit, Type *elem_type) {
   size_t name_len = strlen(elem_type->name) + 3;
-  char *name = arena_alloc(arena, name_len);
+  char *name = arena_alloc(&comp_unit->arena, name_len);
   snprintf(name, name_len, "[]%s", elem_type->name);
 
-  Type *slice_type = arena_alloc(arena, sizeof(Type));
-  *slice_type = (Type){
+  const char *ptr_name = st_intern(&comp_unit->intern_table, "ptr");
+  const char *len_name = st_intern(&comp_unit->intern_table, "len");
+
+  SliceType *slice = arena_alloc(&comp_unit->arena, sizeof(SliceType));
+  Type *ptr_type = type_pointer_to(comp_unit, elem_type);
+
+  slice->fields[SLICE_PTR_INDEX] = (TypeField){.name = ptr_name, .type = ptr_type, .offset = 0};
+  slice->fields[SLICE_LEN_INDEX] = (TypeField){.name = len_name, .type = type_i64, .offset = type_void_ptr->size};
+
+  slice->type = (Type){
     .kind = TYPE_KIND_SLICE,
     .name = name,
-    .size = 16,
-    .alignment = 8,
-    .slice = {.elem_type = elem_type},
+    .size = type_void_ptr->size + type_i64->size,
+    .alignment = type_void_ptr->alignment,
+    .structure = {.fields = slice->fields, .field_count = 2},
   };
 
-  return slice_type;
+  return &slice->type;
 }
 
 Type *type_elem(Type *type) {
   assert(type_is_array_like(type) && "type_elem: type is neither an array nor a slice");
 
-  return type_is_array(type) ? type->array.elem_type : type->slice.elem_type;
+  return type_is_array(type) ? type->array.elem_type : SLICE_ELEM_TYPE(type);
 }
 
 Type *type_default(Type *type) {
@@ -357,21 +374,8 @@ Type *type_default(Type *type) {
   return type;
 }
 
-bool type_find_field(Arena *arena, Type *type, const char *name, TypeField *field) {
-  if (type_is_slice(type)) {
-    if (strcmp(name, "ptr") == 0) {
-      Type *ptr_type = type_pointer_to(arena, type->slice.elem_type);
-      *field = (TypeField){.name = name, .type = ptr_type, .offset = SLICE_PTR_OFFSET};
-      return true;
-    }
-    if (strcmp(name, "len") == 0) {
-      *field = (TypeField){.name = name, .type = type_i64, .offset = SLICE_LEN_OFFSET};
-      return true;
-    }
-    return false;
-  }
-
-  if (!type_is_struct(type)) {
+bool type_find_field(Type *type, const char *name, TypeField *field) {
+  if (!type_has_fields(type)) {
     return false;
   }
 

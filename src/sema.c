@@ -547,7 +547,7 @@ static Type *sema_array_of(SemaContext *ctx, SourceLoc loc, Type *elem_type, uin
   }
 
   // The size check above keeps the length within 32 bits.
-  return type_array_of(&ctx->comp_unit->arena, elem_type, (uint32_t)length);
+  return type_array_of(ctx->comp_unit, elem_type, (uint32_t)length);
 }
 
 // Expression semantic analysis functions
@@ -562,7 +562,7 @@ static Type *sema_expr_literal(SemaContext *ctx, AstExpr *expr) {
   case AST_LITERAL_CHAR:
     return type_untyped_int;
   case AST_LITERAL_STRING:
-    return type_slice_of(&ctx->comp_unit->arena, type_u8);
+    return type_slice_of(ctx->comp_unit, type_u8);
 
   case AST_LITERAL_TRUE:
   case AST_LITERAL_FALSE:
@@ -728,7 +728,8 @@ static Type *sema_expr_array_literal(SemaContext *ctx, AstExpr *expr, Type *hint
   }
 
   if (hint && type_is_slice(hint)) {
-    hint = sema_array_of(ctx, expr->loc, hint->slice.elem_type, length);
+    Type *slice_elem_type = type_elem(hint);
+    hint = sema_array_of(ctx, expr->loc, slice_elem_type, length);
     if (hint == type_error) {
       return type_error;
     }
@@ -859,8 +860,9 @@ static Type *sema_expr_struct_literal(SemaContext *ctx, AstExpr *expr, Type *hin
     AstExprStructLiteralField *field = &struct_literal_expr->fields[i];
 
     TypeField type_field;
+    bool found = type_find_field(struct_type, field->name, &type_field);
 
-    if (!type_find_field(&ctx->comp_unit->arena, struct_type, field->name, &type_field)) {
+    if (!found) {
       sema_error(ctx, field->loc, "Struct '%s' has no field '%s'", type_display_name(struct_type), field->name);
       continue;
     }
@@ -919,7 +921,7 @@ static Type *sema_expr_addr_of(SemaContext *ctx, AstExpr *expr) {
     sym->local.in_memory = true;
   }
 
-  return type_pointer_to(&ctx->comp_unit->arena, operand_type);
+  return type_pointer_to(ctx->comp_unit, operand_type);
 }
 
 // Types `p.*`: the operand must be a pointer to a type with storage.
@@ -1072,7 +1074,7 @@ static Type *sema_expr_slice(SemaContext *ctx, AstExpr *expr) {
     return type_error;
   }
 
-  return type_slice_of(&ctx->comp_unit->arena, type_elem(target_type));
+  return type_slice_of(ctx->comp_unit, type_elem(target_type));
 }
 
 // Types `object.member`. The length of an array is a constant, so `xs.len` becomes an integer literal.
@@ -1098,7 +1100,7 @@ static Type *sema_expr_member(SemaContext *ctx, AstExpr *expr) {
   }
 
   TypeField field = {0};
-  bool found = type_find_field(&ctx->comp_unit->arena, object_type, member_expr->member, &field);
+  bool found = type_find_field(object_type, member_expr->member, &field);
 
   if (!found) {
     sema_error(
@@ -2024,19 +2026,6 @@ static Symbol *sema_declare(SemaContext *ctx, AstDecl *decl, const char *name, S
   return sym;
 }
 
-// Declares a function with an empty type, which `sema_resolve_function` fills in.
-static void sema_declare_function(SemaContext *ctx, AstDecl *decl) {
-  AstDeclFunction *func_decl = &decl->decl_function;
-
-  Type *func_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
-  *func_type = (Type){
-    .kind = TYPE_KIND_FUNCTION,
-    .name = func_decl->name,
-  };
-
-  func_decl->symbol = sema_declare(ctx, decl, func_decl->name, SYMBOL_FUNCTION, func_type);
-}
-
 // Declares a struct with an empty type, which `sema_resolve_struct` fills in. Types that name it by pointer can
 // already refer to that type.
 static void sema_declare_struct(SemaContext *ctx, AstDecl *decl) {
@@ -2051,14 +2040,27 @@ static void sema_declare_struct(SemaContext *ctx, AstDecl *decl) {
   struct_decl->symbol = sema_declare(ctx, decl, struct_decl->name, SYMBOL_TYPE, struct_type);
 }
 
+// Declares a function with an empty type, which `sema_resolve_function` fills in.
+static void sema_declare_function(SemaContext *ctx, AstDecl *decl) {
+  AstDeclFunction *func_decl = &decl->decl_function;
+
+  Type *func_type = arena_alloc(&ctx->comp_unit->arena, sizeof(Type));
+  *func_type = (Type){
+    .kind = TYPE_KIND_FUNCTION,
+    .name = func_decl->name,
+  };
+
+  func_decl->symbol = sema_declare(ctx, decl, func_decl->name, SYMBOL_FUNCTION, func_type);
+}
+
 static void sema_declare_decl(SemaContext *ctx, AstDecl *decl) {
   switch (decl->kind) {
-  case AST_DECL_FUNCTION:
-    sema_declare_function(ctx, decl);
-    break;
-
   case AST_DECL_STRUCT:
     sema_declare_struct(ctx, decl);
+    break;
+
+  case AST_DECL_FUNCTION:
+    sema_declare_function(ctx, decl);
     break;
 
   case AST_DECL_INVALID:
@@ -2068,32 +2070,6 @@ static void sema_declare_decl(SemaContext *ctx, AstDecl *decl) {
 }
 
 // Resolve: types
-
-// Resolves the signature of a function into the type that was declared for it.
-static void sema_resolve_function(SemaContext *ctx, AstDecl *decl) {
-  AstDeclFunction *func_decl = &decl->decl_function;
-  Symbol *sym = func_decl->symbol;
-
-  Type *return_type = sema_type(ctx, func_decl->return_type);
-
-  Type **param_types = arena_alloc(&ctx->comp_unit->arena, sizeof(Type *) * func_decl->param_count);
-  for (uint32_t i = 0; i < func_decl->param_count; i++) {
-    AstParam *param = &func_decl->params[i];
-    param_types[i] = sema_require_storage(ctx, param->loc, "parameter", param->name, sema_type(ctx, param->type));
-  }
-
-  *sym->type = (Type){
-    .kind = TYPE_KIND_FUNCTION,
-    .name = func_decl->name,
-    .function =
-      {
-        .return_type = return_type,
-        .param_types = param_types,
-        .param_count = func_decl->param_count,
-        .is_variadic = func_decl->is_variadic,
-      },
-  };
-}
 
 // Reports field `index` of a struct if an earlier field has the same name; returns whether it is a duplicate.
 static bool sema_is_duplicate_field(SemaContext *ctx, const AstDeclStruct *struct_decl, uint32_t index) {
@@ -2169,6 +2145,32 @@ static void sema_resolve_struct(SemaContext *ctx, AstDecl *decl) {
   };
 }
 
+// Resolves the signature of a function into the type that was declared for it.
+static void sema_resolve_function(SemaContext *ctx, AstDecl *decl) {
+  AstDeclFunction *func_decl = &decl->decl_function;
+  Symbol *sym = func_decl->symbol;
+
+  Type *return_type = sema_type(ctx, func_decl->return_type);
+
+  Type **param_types = arena_alloc(&ctx->comp_unit->arena, sizeof(Type *) * func_decl->param_count);
+  for (uint32_t i = 0; i < func_decl->param_count; i++) {
+    AstParam *param = &func_decl->params[i];
+    param_types[i] = sema_require_storage(ctx, param->loc, "parameter", param->name, sema_type(ctx, param->type));
+  }
+
+  *sym->type = (Type){
+    .kind = TYPE_KIND_FUNCTION,
+    .name = func_decl->name,
+    .function =
+      {
+        .return_type = return_type,
+        .param_types = param_types,
+        .param_count = func_decl->param_count,
+        .is_variadic = func_decl->is_variadic,
+      },
+  };
+}
+
 // Resolves the type of the declaration `sym` names, once. Returns false if the declaration needs itself to be
 // resolved, so a struct that contains itself by value is reported.
 static bool sema_resolve_symbol(SemaContext *ctx, Symbol *sym) {
@@ -2190,12 +2192,12 @@ static bool sema_resolve_symbol(SemaContext *ctx, Symbol *sym) {
   sym->resolve_state = SYMBOL_STATE_RESOLVING;
 
   switch (sym->decl->kind) {
-  case AST_DECL_FUNCTION:
-    sema_resolve_function(ctx, sym->decl);
-    break;
-
   case AST_DECL_STRUCT:
     sema_resolve_struct(ctx, sym->decl);
+    break;
+
+  case AST_DECL_FUNCTION:
+    sema_resolve_function(ctx, sym->decl);
     break;
 
   case AST_DECL_INVALID:
@@ -2244,12 +2246,12 @@ static void sema_check_function(SemaContext *ctx, AstDecl *decl) {
 
 static void sema_check_decl(SemaContext *ctx, AstDecl *decl) {
   switch (decl->kind) {
-  case AST_DECL_FUNCTION:
-    sema_check_function(ctx, decl);
-    break;
-
   case AST_DECL_STRUCT:
   case AST_DECL_INVALID:
+    break;
+
+  case AST_DECL_FUNCTION:
+    sema_check_function(ctx, decl);
     break;
   }
 }
@@ -2293,7 +2295,7 @@ static Type *sema_type_pointer(SemaContext *ctx, AstType *ast_type, bool need_co
     return type_error;
   }
 
-  return type_pointer_to(&ctx->comp_unit->arena, base_type);
+  return type_pointer_to(ctx->comp_unit, base_type);
 }
 
 // Resolves `[N]T`: the length must be a positive integer literal.
@@ -2354,7 +2356,7 @@ static Type *sema_type_slice(SemaContext *ctx, AstType *ast_type, bool need_comp
     return type_error;
   }
 
-  return type_slice_of(&ctx->comp_unit->arena, elem_type);
+  return type_slice_of(ctx->comp_unit, elem_type);
 }
 
 static Type *sema_type_impl(SemaContext *ctx, AstType *ast_type, bool need_complete) {
@@ -2423,11 +2425,11 @@ void sema_free(SemaContext *ctx) {
 // The symbol a declaration introduced.
 static Symbol *decl_symbol(const AstDecl *decl) {
   switch (decl->kind) {
-  case AST_DECL_FUNCTION:
-    return decl->decl_function.symbol;
-
   case AST_DECL_STRUCT:
     return decl->decl_struct.symbol;
+
+  case AST_DECL_FUNCTION:
+    return decl->decl_function.symbol;
 
   case AST_DECL_INVALID:
     break;

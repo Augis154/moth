@@ -2,6 +2,7 @@
 #define TYPES_H
 
 #include "common.h"
+#include "compiler.h"
 #include "lib/arena.h"
 
 #include <stdbool.h>
@@ -40,8 +41,8 @@ typedef enum {
   TYPE_KIND_POINTER,
   TYPE_KIND_ARRAY,
   TYPE_KIND_SLICE,
-  TYPE_KIND_FUNCTION,
   TYPE_KIND_STRUCT,
+  TYPE_KIND_FUNCTION,
 } TypeKind;
 
 typedef struct {
@@ -52,18 +53,6 @@ typedef struct {
   Type *elem_type;
   uint32_t length;
 } TypeArray;
-
-typedef struct {
-  Type *elem_type;
-} TypeSlice;
-
-typedef struct {
-  Type *return_type;
-  Type **param_types;
-
-  uint32_t param_count;
-  bool is_variadic;
-} TypeFunction;
 
 // A field of a type: its name, its type and where it is in memory
 typedef struct {
@@ -77,6 +66,14 @@ typedef struct {
   uint32_t field_count;
 } TypeStruct;
 
+typedef struct {
+  Type *return_type;
+  Type **param_types;
+
+  uint32_t param_count;
+  bool is_variadic;
+} TypeFunction;
+
 struct Type_ {
   TypeKind kind;
   uint32_t size;
@@ -86,15 +83,22 @@ struct Type_ {
   union {
     TypePointer pointer;
     TypeArray array;
-    TypeSlice slice;
+    TypeStruct structure; // A struct, or a slice
     TypeFunction function;
-    TypeStruct structure;
   };
 };
 
-// The layout of a slice is `{ptr, len}`: the offsets in bytes of its two fields
-#define SLICE_PTR_OFFSET 0
-#define SLICE_LEN_OFFSET 8
+// A slice is `{ptr, len}`: its first two fields, in the `structure` of the slice type
+#define SLICE_PTR_INDEX 0
+#define SLICE_LEN_INDEX 1
+
+#define SLICE_FIELD(slice, index) ((slice)->structure.fields[(index)])
+
+#define SLICE_PTR_FIELD(slice) SLICE_FIELD(slice, SLICE_PTR_INDEX)
+#define SLICE_LEN_FIELD(slice) SLICE_FIELD(slice, SLICE_LEN_INDEX)
+
+#define SLICE_PTR_TYPE(slice) (SLICE_PTR_FIELD(slice).type)
+#define SLICE_ELEM_TYPE(slice) (SLICE_PTR_TYPE(slice)->pointer.base_type)
 
 #define TYPE_EXTERN(kind, size, ident) extern Type *const type_##ident;
 TYPES_BUILTIN(TYPE_EXTERN)
@@ -116,6 +120,8 @@ bool type_is_slice(Type *type);
 bool type_is_struct(Type *type);
 // An array or a slice: something that can be indexed and sliced
 bool type_is_array_like(Type *type);
+// A struct or a slice: something with named fields
+bool type_has_fields(Type *type);
 // Values that are handled by the address of their storage instead of being loaded into a register
 bool type_is_aggregate(Type *type);
 
@@ -144,11 +150,11 @@ Type *type_common(Type *a, Type *b);
 
 // Building and deriving types
 // Builds the type `*base`
-Type *type_pointer_to(Arena *arena, Type *base_type);
+Type *type_pointer_to(CompilationUnit *comp_unit, Type *base_type);
 // Builds the type `[length]element`
-Type *type_array_of(Arena *arena, Type *elem_type, uint32_t length);
+Type *type_array_of(CompilationUnit *comp_unit, Type *elem_type, uint32_t length);
 // Builds the type `[]element`
-Type *type_slice_of(Arena *arena, Type *elem_type);
+Type *type_slice_of(CompilationUnit *comp_unit, Type *elem_type);
 // The element type of an array or a slice
 Type *type_elem(Type *type);
 // The concrete type an untyped literal takes when nothing else decides it
@@ -156,6 +162,6 @@ Type *type_default(Type *type);
 
 // Fields of a type
 // Finds the field `name` of `type`, a struct or a slice; false when it has none.
-bool type_find_field(Arena *arena, Type *type, const char *name, TypeField *field);
+bool type_find_field(Type *type, const char *name, TypeField *field);
 
 #endif // TYPES_H
