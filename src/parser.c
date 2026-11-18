@@ -95,6 +95,12 @@ static inline bool check(Parser *parser, TokenKind kind) {
   return parser->current.kind == kind;
 }
 
+// Whether the token after the current one has `kind`; it looks ahead on a copy of the lexer.
+static bool check_next(Parser *parser, TokenKind kind) {
+  Lexer ahead = parser->lexer;
+  return lexer_get_token(&ahead).kind == kind;
+}
+
 static bool match(Parser *parser, TokenKind kind) {
   if (!check(parser, kind)) return false;
   advance(parser);
@@ -808,19 +814,22 @@ static AstExpr *parse_expr_array_literal(Parser *parser) {
   return expr;
 }
 
-// IDENT ':' expression  -- one initialiser of a struct literal. Returns false after reporting an error.
+// [ IDENT ':' ] expression  -- one initialiser of a struct literal; without a name it sets the field at its position.
+// Returns false after reporting an error.
 static bool parse_struct_literal_field(Parser *parser, AstExprStructLiteralField *field) {
   SourceLoc field_loc = parser->current.loc;
+  const char *field_name = NULL;
 
-  if (!match(parser, TOKEN_IDENT)) {
-    error_at(parser, parser->current, "Expected struct literal field name.");
-    return false;
+  if (check(parser, TOKEN_IDENT) && check_next(parser, TOKEN_COLON)) {
+    advance(parser);
+
+    field_name = parse_identifier_name(parser, parser->previous);
+    if (!field_name) return false;
+
+    if (!consume(parser, TOKEN_COLON, "Expected ':' after struct literal field name.")) {
+      return false;
+    }
   }
-
-  const char *field_name = parse_identifier_name(parser, parser->previous);
-  if (!field_name) return false;
-
-  if (!consume(parser, TOKEN_COLON, "Expected ':' after struct literal field name.")) return false;
 
   AstExpr *value = parse_expr(parser);
   if (!value) return false;

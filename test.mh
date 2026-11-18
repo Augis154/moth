@@ -11,7 +11,7 @@ fn main(): i64 {
   printf("%s\n".ptr, str.ptr);
 
   var p1: Point = .{ x: 10, y: 20.5 };
-  var p2 = Point.{ x: 5, y: 12.34 };
+  var p2 = Point.{ 5, 12.34 };
 
   printf("Point 1: %d, %f\n".ptr, p1.x, p1.y);
   printf("Point 2: %d, %f\n".ptr, p2.x, p2.y);

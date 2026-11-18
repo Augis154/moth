@@ -817,7 +817,8 @@ static bool sema_is_duplicate_literal_field(SemaContext *ctx, const AstExprStruc
   return false;
 }
 
-// Types `Name.{ field: value, ... }`: each value converts to its field's type and an omitted field is zero.
+// Types `Name.{ field: value, ... }` or `Name.{ value, ... }`, never mixed: each value converts to its field's type and
+// an omitted field is zero.
 static Type *sema_expr_struct_literal(SemaContext *ctx, AstExpr *expr, Type *hint) {
   AstExprStructLiteral *struct_literal_expr = &expr->expr_struct_literal;
 
@@ -856,18 +857,40 @@ static Type *sema_expr_struct_literal(SemaContext *ctx, AstExpr *expr, Type *hin
     }
   }
 
+  if (struct_literal_expr->field_count > struct_type->structure.field_count) {
+    sema_error(ctx, expr->loc, "Struct literal for '%s' has too many fields", type_display_name(struct_type));
+    return type_error;
+  }
+
+  bool has_named = false, has_positional = false;
+  for (uint32_t i = 0; i < field_count; i++) {
+    if (struct_literal_expr->fields[i].name == NULL) {
+      has_positional = true;
+    } else {
+      has_named = true;
+    }
+  }
+
+  if (has_named && has_positional) {
+    sema_error(
+      ctx, expr->loc, "Cannot mix named and unnamed fields in struct literal for '%s'", type_display_name(struct_type));
+    return type_error;
+  }
+
   for (uint32_t i = 0; i < field_count; i++) {
     AstExprStructLiteralField *field = &struct_literal_expr->fields[i];
 
+    const char *field_name = field->name ? field->name : struct_type->structure.fields[i].name;
+
     TypeField type_field;
-    bool found = type_find_field(struct_type, field->name, &type_field);
+    bool found = type_find_field(struct_type, field_name, &type_field);
 
     if (!found) {
-      sema_error(ctx, field->loc, "Struct '%s' has no field '%s'", type_display_name(struct_type), field->name);
+      sema_error(ctx, field->loc, "Struct '%s' has no field '%s'", type_display_name(struct_type), field_name);
       continue;
     }
 
-    if (sema_is_duplicate_literal_field(ctx, struct_literal_expr, struct_type, i)) {
+    if (field->name && sema_is_duplicate_literal_field(ctx, struct_literal_expr, struct_type, i)) {
       continue;
     }
 
@@ -881,7 +904,7 @@ static Type *sema_expr_struct_literal(SemaContext *ctx, AstExpr *expr, Type *hin
       sema_error(ctx,
                  field->loc,
                  "Field '%s' of struct '%s' expects type '%s', but got '%s'",
-                 field->name,
+                 field_name,
                  type_display_name(struct_type),
                  type_display_name(type_field.type),
                  type_display_name(field_type));

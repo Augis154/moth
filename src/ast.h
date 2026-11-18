@@ -138,7 +138,7 @@ typedef struct {
 } AstExprArrayLiteral;
 
 typedef struct {
-  const char *name;
+  const char *name; // NULL when the initialiser is unnamed
   AstExpr *value;
   uint32_t offset; // Filled in by sema
   SourceLoc loc;
